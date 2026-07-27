@@ -2,6 +2,7 @@
 'use strict';
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
@@ -35,20 +36,21 @@ function commandExists(name) {
 }
 
 function hasAny(paths) {
-  return paths.some((p) => fs.existsSync(path.resolve(cwd, p)) || fs.existsSync(path.resolve(process.env.HOME || '', p)));
+  const home = os.homedir();
+  return paths.some((p) => fs.existsSync(path.resolve(cwd, p)) || (home && fs.existsSync(path.resolve(home, p))));
 }
 
 function detectHosts() {
   const env = process.env;
   // Session env vars are set only inside a live host session — trust them alone.
+  // CODEX_HOME is excluded: it is a persistent config variable, not session-only.
   if (env.CLAUDECODE) return ['claude'];
-  if (env.CODEX_HOME) return ['codex'];
   if (env.OPENCODE) return ['opencode'];
   if ((env.TERM_PROGRAM || '').toLowerCase().includes('cursor') || env.CURSOR_TRACE_ID) return ['cursor'];
 
   const detected = [];
   if (hasAny(['.claude', '.claude.json']) || commandExists('claude')) detected.push('claude');
-  if (hasAny(['.codex']) || commandExists('codex')) detected.push('codex');
+  if (hasAny(['.codex']) || env.CODEX_HOME || commandExists('codex')) detected.push('codex');
   if (hasAny(['.opencode']) || commandExists('opencode')) detected.push('opencode');
   if (hasAny(['.cursor']) || commandExists('cursor')) detected.push('cursor');
 
@@ -71,7 +73,27 @@ function resolveTarget(requested) {
 
 function getFlag(name) {
   const index = args.indexOf(name);
-  return index >= 0 ? args[index + 1] : undefined;
+  if (index >= 0) return args[index + 1];
+  const eq = args.find((a) => a.startsWith(`${name}=`));
+  return eq ? eq.slice(name.length + 1) : undefined;
+}
+
+function readHostFile() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(cwd, '.graph', 'host.json'), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function ensureGitignore() {
+  const gi = path.join(cwd, '.gitignore');
+  if (!fs.existsSync(path.join(cwd, '.git')) && !fs.existsSync(gi)) return;
+  let text = '';
+  try { text = fs.readFileSync(gi, 'utf8'); } catch {}
+  if (text.split(/\r?\n/).some((line) => ['.graph', '.graph/'].includes(line.trim()))) return;
+  fs.writeFileSync(gi, text + (text && !text.endsWith('\n') ? '\n' : '') + '.graph/\n');
+  console.log('Added .graph/ to .gitignore');
 }
 
 function install(requested) {
@@ -81,8 +103,11 @@ function install(requested) {
     copyDir(path.join(ROOT, src), path.join(cwd, dest));
     console.log(`Installed Graph for ${name} -> ${path.join(cwd, dest)}`);
   }
+  const existing = readHostFile();
+  const hosts = [...new Set([...(existing && existing.hosts || []), ...selected])];
   copyDir(path.join(ROOT, 'core'), path.join(cwd, '.graph'));
-  fs.writeFileSync(path.join(cwd, '.graph', 'host.json'), JSON.stringify({ hosts: selected, installedAt: new Date().toISOString() }, null, 2) + '\n');
+  fs.writeFileSync(path.join(cwd, '.graph', 'host.json'), JSON.stringify({ hosts, installedAt: new Date().toISOString() }, null, 2) + '\n');
+  ensureGitignore();
   console.log(`Installed shared runtime -> ${path.join(cwd, '.graph')}`);
 }
 
@@ -98,7 +123,23 @@ function uninstall(requested) {
     for (const rel of dirs[target]) fs.rmSync(path.join(cwd, rel), { recursive: true, force: true });
     console.log(`Removed Graph files for ${target}`);
   }
-  fs.rmSync(path.join(cwd, '.graph'), { recursive: true, force: true });
+  const markers = {
+    claude: '.claude/commands/graph.md',
+    codex: '.codex/skills/graph/SKILL.md',
+    opencode: '.opencode/commands/graph.md',
+    cursor: '.cursor/rules/graph.mdc'
+  };
+  const existing = readHostFile();
+  // Missing/corrupt host.json (pre-0.4 installs): infer installed hosts from adapter files on disk.
+  const installed = (existing && existing.hosts) || Object.keys(markers).filter((h) => fs.existsSync(path.join(cwd, markers[h])));
+  const remaining = installed.filter((h) => !selected.includes(h));
+  if (remaining.length && fs.existsSync(path.join(cwd, '.graph'))) {
+    fs.writeFileSync(path.join(cwd, '.graph', 'host.json'), JSON.stringify({ hosts: remaining, installedAt: existing ? existing.installedAt : new Date().toISOString() }, null, 2) + '\n');
+    console.log(`Kept shared runtime .graph for remaining hosts: ${remaining.join(', ')}`);
+  } else {
+    fs.rmSync(path.join(cwd, '.graph'), { recursive: true, force: true });
+    console.log('Removed shared runtime .graph');
+  }
 }
 
 function detect() {

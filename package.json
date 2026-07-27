@@ -1,6 +1,6 @@
 {
   "name": "graph-skill",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Auto-detecting graph workflow with local checks, caching, selective retries, resume, and interactive reports",
   "keywords": [
     "claude-code",
@@ -28,6 +28,7 @@
     "core/graph.py",
     "templates/",
     "examples/",
+    "tests/",
     "README.md",
     "LICENSE"
   ],

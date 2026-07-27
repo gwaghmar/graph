@@ -7,7 +7,7 @@ const {spawnSync} = require('child_process');
 const bin = path.resolve(__dirname, '../bin/graph-skill.js');
 
 function cleanEnv(home) {
-  return {...process.env, HOME: home, PATH: '/usr/bin:/bin', TERM_PROGRAM: '', CLAUDECODE: '', CODEX_HOME: '', OPENCODE: ''};
+  return {...process.env, HOME: home, PATH: '/usr/bin:/bin', TERM_PROGRAM: '', CLAUDECODE: '', CODEX_HOME: '', OPENCODE: '', CURSOR_TRACE_ID: ''};
 }
 
 test('explicit all installs all adapters and runtime', () => {
@@ -29,6 +29,33 @@ test('auto-detects Codex and installs only Codex', () => {
   assert.equal(fs.existsSync(path.join(dir, '.cursor/rules/graph.mdc')), false);
   const host = JSON.parse(fs.readFileSync(path.join(dir, '.graph/host.json'), 'utf8'));
   assert.deepEqual(host.hosts, ['codex']);
+});
+
+test('uninstalling one host keeps the shared runtime for remaining hosts', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'graph-multi-'));
+  let r = spawnSync(process.execPath, [bin, 'install', '--target', 'all'], {cwd: dir, encoding:'utf8', env: cleanEnv(dir)});
+  assert.equal(r.status, 0, r.stderr);
+  r = spawnSync(process.execPath, [bin, 'uninstall', '--target', 'codex'], {cwd: dir, encoding:'utf8', env: cleanEnv(dir)});
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(fs.existsSync(path.join(dir, '.codex/skills/graph/SKILL.md')), false);
+  assert.equal(fs.existsSync(path.join(dir, '.graph/graph.py')), true, 'shared runtime must survive');
+  assert.equal(fs.existsSync(path.join(dir, '.claude/commands/graph.md')), true);
+  const host = JSON.parse(fs.readFileSync(path.join(dir, '.graph/host.json'), 'utf8'));
+  assert.deepEqual(host.hosts.sort(), ['claude', 'cursor', 'opencode']);
+  r = spawnSync(process.execPath, [bin, 'uninstall', '--target', 'all'], {cwd: dir, encoding:'utf8', env: cleanEnv(dir)});
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(fs.existsSync(path.join(dir, '.graph')), false, 'runtime removed once no hosts remain');
+});
+
+test('accepts --target=host equals form and merges host.json across installs', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'graph-eq-'));
+  let r = spawnSync(process.execPath, [bin, 'install', '--target=codex'], {cwd: dir, encoding:'utf8', env: cleanEnv(dir)});
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(fs.existsSync(path.join(dir, '.codex/skills/graph/SKILL.md')), true);
+  r = spawnSync(process.execPath, [bin, 'install', '--target=claude'], {cwd: dir, encoding:'utf8', env: cleanEnv(dir)});
+  assert.equal(r.status, 0, r.stderr);
+  const host = JSON.parse(fs.readFileSync(path.join(dir, '.graph/host.json'), 'utf8'));
+  assert.deepEqual(host.hosts.sort(), ['claude', 'codex']);
 });
 
 test('stops instead of guessing when no host is detected', () => {
@@ -57,10 +84,33 @@ test('runtime supports cache, smart retry, resume, quality, and interactive repo
   r = spawnSync('python3', [py, 'cache-get', 'testrun', 'worker', '--files', 'source.txt'], {cwd: dir, encoding:'utf8'});
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /"result": "done"/);
+  r = spawnSync('python3', [py, 'cache-get', 'testrun', 'worker', '--files', 'missing.txt'], {cwd: dir, encoding:'utf8'});
+  assert.equal(r.status, 2, 'cache miss exits 2');
+  assert.match(r.stdout, /MISS/);
   r = spawnSync('python3', [py, 'quality', 'testrun', '--command', 'true'], {cwd: dir, encoding:'utf8'});
   assert.equal(r.status, 0, r.stderr);
+  r = spawnSync('python3', [py, 'quality', 'testrun', '--command', 'false'], {cwd: dir, encoding:'utf8'});
+  assert.equal(r.status, 1, 'failing check exits 1');
   r = spawnSync('python3', [py, 'resume'], {cwd: dir, encoding:'utf8'});
   assert.equal(JSON.parse(r.stdout).run, 'testrun');
+  r = spawnSync('python3', [py, 'tree', 'testrun'], {cwd: dir, encoding:'utf8'});
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /◉ testrun/);
+  assert.match(r.stdout, /review .*← worker/);
+  r = spawnSync('python3', [py, 'node', 'testrun', 'review', '--role', 'reviewer', '--status', 'passed'], {cwd: dir, encoding:'utf8'});
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /review/, 'node transition prints the live graph');
+  r = spawnSync('python3', [py, 'node', 'testrun', '<img src=x onerror=alert(1)>', '--role', 'worker', '--status', 'pending'], {cwd: dir, encoding:'utf8'});
+  assert.equal(r.status, 0, r.stderr);
+  const hostileReport = fs.readFileSync(path.join(dir, '.graph/runs/testrun/graph.html'), 'utf8');
+  assert.doesNotMatch(hostileReport, /<img/, 'node ids must not inject markup into the report');
+  assert.match(hostileReport, /u003cimg/, 'hostile node was recorded, escaped');
+  r = spawnSync('python3', [py, 'finish', 'testrun', '--status', 'complete'], {cwd: dir, encoding:'utf8'});
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /Graph summary/);
+  assert.match(r.stdout, /Report: .*graph\.html/);
+  r = spawnSync('python3', [py, 'resume'], {cwd: dir, encoding:'utf8'});
+  assert.notEqual(r.status, 0, 'finished runs are not resumable');
   const report = fs.readFileSync(path.join(dir, '.graph/runs/testrun/graph.html'), 'utf8');
   assert.match(report, /Execution graph/);
   assert.match(report, /Node details/);

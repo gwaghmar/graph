@@ -5,12 +5,13 @@ alwaysApply: false
 ---
 # Graph workflow
 When the user invokes @graph:
-- For trivial single-file tasks, use one implementation node plus local quality checks; skip planner and reviewer agents.
+- Size first: estimate files to change (F), design decisions (D), cross-cutting risk (R). F ≤ 1 with no D/R → one implementation node plus local quality checks, no planner or reviewer agents. F 2–4 or D = 1 → 2–3 nodes, at most one reviewer. F ≥ 5, D ≥ 2, or R → full planner/workers/reviewer protocol, one worker per independent file cluster.
 - Initialize a run, or resume the latest incomplete run when requested.
 - Record planning, implementation, checks, review, and synthesis nodes.
 - Check the local content cache before any avoidable model call.
 - Run local quality gates before model reviewers.
 - Retry only failed nodes and dependent nodes, maximum twice.
 - Cache successful reusable node outputs.
-- Keep the local HTML graph updated and report its path at completion.
+- Rely on the live ASCII graph printed by each `.graph/graph.py node` call as the progress display; do not re-describe it in prose.
+- Keep the local HTML graph updated; at completion, run `.graph/graph.py finish` and relay the printed run summary plus the report path.
 - Commit only with explicit user permission.
