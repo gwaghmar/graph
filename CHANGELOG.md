@@ -4,11 +4,15 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-27
+
 ### Added
+- OpenClaw adapter (`--target openclaw`): installs the graph skill as an OpenClaw project-agent skill under `.agents/skills/graph/` (SKILL.md per the agentskills.io standard, `python3` dependency gating, runtime self-bootstrap). Publishable to ClawHub and installable from Hermes.
 - GitHub Actions CI running the test suite on Node 18/20/22.
 - CONTRIBUTING guide, issue/PR templates.
 
 ### Fixed
+- Run status now advances from `planning` to `running` when the first node starts, matching the documented live-graph header.
 - Completed the MIT license text (it was missing the standard warranty/liability boilerplate, which was causing GitHub to classify the license as "Other" instead of MIT).
 - Removed the `blocked` node status from the protocol docs and renderer — it was documented as "waiting on a human decision" but no adapter or agent ever set it.
 
