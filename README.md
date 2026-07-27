@@ -39,6 +39,7 @@ No polling, no dashboard, no plugin. That tree is printed straight to stdout by 
 - [Runtime reference](#runtime-reference)
 - [FAQ](#faq)
 - [Contributing](#contributing)
+- [Changelog](CHANGELOG.md)
 
 ## Why
 
@@ -182,3 +183,7 @@ npm test
 ## License
 
 [MIT](LICENSE)
+
+---
+
+If Graph Skill saves you tokens or catches a bad run before it spreads, a ⭐ helps other people find it.
