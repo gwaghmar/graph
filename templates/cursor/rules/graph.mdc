@@ -1,0 +1,16 @@
+---
+description: Cached graph workflow with local validation, selective retries, resume, and interactive reporting
+globs:
+alwaysApply: false
+---
+# Graph workflow
+When the user invokes @graph:
+- For trivial single-file tasks, use one implementation node plus local quality checks; skip planner and reviewer agents.
+- Initialize a run, or resume the latest incomplete run when requested.
+- Record planning, implementation, checks, review, and synthesis nodes.
+- Check the local content cache before any avoidable model call.
+- Run local quality gates before model reviewers.
+- Retry only failed nodes and dependent nodes, maximum twice.
+- Cache successful reusable node outputs.
+- Keep the local HTML graph updated and report its path at completion.
+- Commit only with explicit user permission.

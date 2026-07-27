@@ -1,0 +1,5 @@
+__pycache__/
+node_modules/
+*.tgz
+.graph/
+.DS_Store

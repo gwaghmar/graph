@@ -1,0 +1,44 @@
+{
+  "name": "graph-skill",
+  "version": "0.3.1",
+  "description": "Auto-detecting graph workflow with local checks, caching, selective retries, resume, and interactive reports",
+  "keywords": [
+    "claude-code",
+    "codex",
+    "opencode",
+    "cursor",
+    "agent",
+    "skill",
+    "workflow",
+    "dependency-graph",
+    "graph-engineering",
+    "token-efficiency"
+  ],
+  "author": "Govind <govindw007@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gwaghmar/graph.git"
+  },
+  "bugs": {
+    "url": "https://github.com/gwaghmar/graph/issues"
+  },
+  "homepage": "https://github.com/gwaghmar/graph#readme",
+  "files": [
+    "bin/",
+    "core/graph.py",
+    "templates/",
+    "examples/",
+    "README.md",
+    "LICENSE"
+  ],
+  "bin": {
+    "graph-skill": "bin/graph-skill.js"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}
