@@ -3,6 +3,7 @@
 **Graph engineering for Claude Code, Codex, OpenCode, and Cursor.**
 Stop having one long agent conversation. Plan the work as a dependency graph of small, focused nodes — cached, validated, and retried individually — and watch it run live in your terminal.
 
+[![npm](https://img.shields.io/npm/v/graph-skill?color=cb3837&label=npm)](https://www.npmjs.com/package/graph-skill)
 [![CI](https://github.com/gwaghmar/graph/actions/workflows/ci.yml/badge.svg)](https://github.com/gwaghmar/graph/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D18-339933?logo=node.js&logoColor=white)](package.json)
@@ -83,11 +84,6 @@ Requirements: **Node.js 18+** (for the installer) and **`python3` on PATH** (for
 ```bash
 npx graph-skill install
 ```
-
-> Package not on npm yet? Install straight from GitHub — works identically:
-> ```bash
-> npx github:gwaghmar/graph install
-> ```
 
 The installer auto-detects your active host and installs only that adapter. Force a specific one with `--target`:
 
