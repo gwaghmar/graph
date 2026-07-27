@@ -15,7 +15,8 @@ const TARGETS = {
   claude: ['templates/claude-code', '.claude'],
   codex: ['templates/codex', '.codex'],
   opencode: ['templates/opencode', '.opencode'],
-  cursor: ['templates/cursor', '.cursor']
+  cursor: ['templates/cursor', '.cursor'],
+  openclaw: ['templates/openclaw', '.agents/skills']
 };
 
 function copyDir(src, dest) {
@@ -53,6 +54,7 @@ function detectHosts() {
   if (hasAny(['.codex']) || env.CODEX_HOME || commandExists('codex')) detected.push('codex');
   if (hasAny(['.opencode']) || commandExists('opencode')) detected.push('opencode');
   if (hasAny(['.cursor']) || commandExists('cursor')) detected.push('cursor');
+  if (hasAny(['.openclaw']) || commandExists('openclaw')) detected.push('openclaw');
 
   return detected;
 }
@@ -66,7 +68,7 @@ function resolveTarget(requested) {
   const detected = detectHosts();
   if (detected.length === 1) return detected;
   if (detected.length === 0) {
-    throw new Error('Could not detect Claude Code, Codex, OpenCode, or Cursor. Use --target <host>.');
+    throw new Error('Could not detect Claude Code, Codex, OpenCode, Cursor, or OpenClaw. Use --target <host>.');
   }
   throw new Error(`Multiple hosts detected (${detected.join(', ')}). Run inside the intended host or use --target <host>.`);
 }
@@ -117,7 +119,8 @@ function uninstall(requested) {
     claude: ['.claude/commands/graph.md', '.claude/agents/graph-planner.md', '.claude/agents/graph-reviewer.md', '.claude/agents/graph-worker.md', '.claude/agents/graph-visualizer.md'],
     codex: ['.codex/skills/graph'],
     opencode: ['.opencode/commands/graph.md'],
-    cursor: ['.cursor/rules/graph.mdc']
+    cursor: ['.cursor/rules/graph.mdc'],
+    openclaw: ['.agents/skills/graph']
   };
   for (const target of selected) {
     for (const rel of dirs[target]) fs.rmSync(path.join(cwd, rel), { recursive: true, force: true });
@@ -127,7 +130,8 @@ function uninstall(requested) {
     claude: '.claude/commands/graph.md',
     codex: '.codex/skills/graph/SKILL.md',
     opencode: '.opencode/commands/graph.md',
-    cursor: '.cursor/rules/graph.mdc'
+    cursor: '.cursor/rules/graph.mdc',
+    openclaw: '.agents/skills/graph/SKILL.md'
   };
   const existing = readHostFile();
   // Missing/corrupt host.json (pre-0.4 installs): infer installed hosts from adapter files on disk.
@@ -148,7 +152,7 @@ function detect() {
 }
 
 function help() {
-  console.log(`graph-skill\n\nUsage:\n  npx graph-skill install              # auto-detect one host\n  npx graph-skill install --target codex\n  npx graph-skill uninstall            # auto-detect one host\n  npx graph-skill detect\n\nTargets: claude, codex, opencode, cursor, all\n`);
+  console.log(`graph-skill\n\nUsage:\n  npx graph-skill install              # auto-detect one host\n  npx graph-skill install --target codex\n  npx graph-skill uninstall            # auto-detect one host\n  npx graph-skill detect\n\nTargets: claude, codex, opencode, cursor, openclaw, all\n`);
 }
 
 try {

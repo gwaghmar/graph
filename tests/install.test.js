@@ -14,7 +14,7 @@ test('explicit all installs all adapters and runtime', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'graph-skill-'));
   const r = spawnSync(process.execPath, [bin, 'install', '--target', 'all'], {cwd: dir, encoding:'utf8', env: cleanEnv(dir)});
   assert.equal(r.status, 0, r.stderr);
-  for (const rel of ['.claude/commands/graph.md','.codex/skills/graph/SKILL.md','.opencode/commands/graph.md','.cursor/rules/graph.mdc','.graph/graph.py']) {
+  for (const rel of ['.claude/commands/graph.md','.codex/skills/graph/SKILL.md','.opencode/commands/graph.md','.cursor/rules/graph.mdc','.agents/skills/graph/SKILL.md','.graph/graph.py']) {
     assert.equal(fs.existsSync(path.join(dir, rel)), true, rel);
   }
 });
@@ -31,6 +31,17 @@ test('auto-detects Codex and installs only Codex', () => {
   assert.deepEqual(host.hosts, ['codex']);
 });
 
+test('auto-detects OpenClaw and installs the project-agent skill', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'graph-openclaw-'));
+  fs.mkdirSync(path.join(dir, '.openclaw'));
+  const r = spawnSync(process.execPath, [bin, 'install'], {cwd: dir, encoding:'utf8', env: cleanEnv(dir)});
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(fs.existsSync(path.join(dir, '.agents/skills/graph/SKILL.md')), true);
+  assert.equal(fs.existsSync(path.join(dir, '.claude/commands/graph.md')), false);
+  const host = JSON.parse(fs.readFileSync(path.join(dir, '.graph/host.json'), 'utf8'));
+  assert.deepEqual(host.hosts, ['openclaw']);
+});
+
 test('uninstalling one host keeps the shared runtime for remaining hosts', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'graph-multi-'));
   let r = spawnSync(process.execPath, [bin, 'install', '--target', 'all'], {cwd: dir, encoding:'utf8', env: cleanEnv(dir)});
@@ -41,7 +52,7 @@ test('uninstalling one host keeps the shared runtime for remaining hosts', () =>
   assert.equal(fs.existsSync(path.join(dir, '.graph/graph.py')), true, 'shared runtime must survive');
   assert.equal(fs.existsSync(path.join(dir, '.claude/commands/graph.md')), true);
   const host = JSON.parse(fs.readFileSync(path.join(dir, '.graph/host.json'), 'utf8'));
-  assert.deepEqual(host.hosts.sort(), ['claude', 'cursor', 'opencode']);
+  assert.deepEqual(host.hosts.sort(), ['claude', 'cursor', 'openclaw', 'opencode']);
   r = spawnSync(process.execPath, [bin, 'uninstall', '--target', 'all'], {cwd: dir, encoding:'utf8', env: cleanEnv(dir)});
   assert.equal(r.status, 0, r.stderr);
   assert.equal(fs.existsSync(path.join(dir, '.graph')), false, 'runtime removed once no hosts remain');

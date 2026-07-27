@@ -85,6 +85,7 @@ def cmd_node(a):
     if a.status in ('running','retrying') and previous not in ('running','retrying'):
         n['attempts'] = n.get('attempts', 0) + 1
         n['started_epoch'] = epoch(); n['started_at'] = now()
+        if d.get('status') == 'planning': d['status'] = 'running'
     if a.status in ('complete','passed','failed','skipped','cached'):
         n['ended_epoch'] = epoch(); n['ended_at'] = now()
         if n.get('started_epoch'): n['duration_ms'] = round((n['ended_epoch'] - n['started_epoch']) * 1000)

@@ -1,6 +1,6 @@
 # Graph Skill
 
-**Graph engineering for Claude Code, Codex, OpenCode, and Cursor.**
+**Graph engineering for Claude Code, Codex, OpenCode, Cursor, and OpenClaw.**
 Stop having one long agent conversation. Plan the work as a dependency graph of small, focused nodes — cached, validated, and retried individually — and watch it run live in your terminal.
 
 [![npm](https://img.shields.io/npm/v/graph-skill?color=cb3837&label=npm)](https://www.npmjs.com/package/graph-skill)
@@ -92,6 +92,7 @@ npx graph-skill install --target codex
 npx graph-skill install --target claude
 npx graph-skill install --target opencode
 npx graph-skill install --target cursor
+npx graph-skill install --target openclaw
 ```
 
 ## Usage
@@ -106,6 +107,7 @@ npx graph-skill install --target cursor
 | Codex | `$graph Build OAuth login and tests` |
 | OpenCode | `/graph Build OAuth login and tests` |
 | Cursor | `@graph Build OAuth login and tests` |
+| OpenClaw | `/graph Build OAuth login and tests` |
 
 Optional flags:
 
@@ -139,6 +141,7 @@ All reporting, checks, retry planning, cache lookup, and graph rendering run **l
 | [Codex](https://openai.com/codex/) | `.codex/skills/graph/` | `$graph` |
 | [OpenCode](https://opencode.ai/) | `.opencode/commands/graph.md` | `/graph` |
 | [Cursor](https://cursor.com/) | `.cursor/rules/graph.mdc` | `@graph` |
+| [OpenClaw](https://openclaw.ai/) | `.agents/skills/graph/` | `/graph` |
 
 Each adapter is a thin prompt/rule file pointing at the same shared `.graph/` runtime — installing for a second host on the same repo reuses it.
 
