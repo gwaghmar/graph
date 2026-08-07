@@ -14,12 +14,12 @@ def epoch(): return time.time()
 def load(run_id):
     p = ROOT / run_id / 'state.json'
     if not p.exists(): raise SystemExit(f'Unknown run: {run_id}')
-    return p, json.loads(p.read_text())
+    return p, json.loads(p.read_text(encoding='utf-8'))
 
 def save(p, data):
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_suffix('.tmp')
-    tmp.write_text(json.dumps(data, indent=2) + '\n')
+    tmp.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
     os.replace(tmp, p)
 
 def safe_id(value):
@@ -203,7 +203,7 @@ def summary_text(d):
     return '\n'.join(lines)
 
 def render_files(p,d):
-    out=p.parent; mm=mermaid(d); (out/'graph.mmd').write_text(mm)
+    out=p.parent; mm=mermaid(d); (out/'graph.mmd').write_text(mm, encoding='utf-8')
     s=stats(d); usage=d.get('usage',{}); total=usage.get('input_tokens',0)+usage.get('output_tokens',0)
     running=not d.get('finished_at') and d.get('status') not in ('complete','passed','failed')
     refresh='<meta http-equiv="refresh" content="2">' if running else ''
@@ -221,7 +221,7 @@ def render_files(p,d):
 <section class="card" style="margin-top:18px"><h2>Quality checks</h2><table><thead><tr><th>Command</th><th>Status</th><th>Duration</th></tr></thead><tbody>{''.join(f'<tr><td>{html.escape(q.get("command",""))}</td><td>{html.escape(q.get("status",""))}</td><td>{q.get("duration_ms",0)} ms</td></tr>' for q in d.get('quality',[])) or '<tr><td colspan="3">No checks recorded</td></tr>'}</tbody></table></section>
 <script>const data={payload};const cpath=new Set({cp_json});const svg=document.getElementById('graph'),details=document.getElementById('details');const nodes=data.nodes||[];const levels={{}};function level(n,seen=new Set()){{if(levels[n.id]!=null)return levels[n.id];if(seen.has(n.id))return 0;seen.add(n.id);let deps=n.depends_on||[];return levels[n.id]=deps.length?1+Math.max(...deps.map(id=>{{let d=nodes.find(x=>x.id===id);return d?level(d,new Set(seen)):0}})):0}}nodes.forEach(n=>level(n));let by={{}};nodes.forEach(n=>(by[levels[n.id]]??=[]).push(n));let pos={{}};Object.keys(by).forEach(l=>by[l].forEach((n,i)=>pos[n.id]={{x:40+Number(l)*210,y:40+i*95}}));const ps=Object.values(pos);if(ps.length)svg.setAttribute('viewBox',`0 0 ${{Math.max(600,...ps.map(q=>q.x+190))}} ${{Math.max(200,...ps.map(q=>q.y+96))}}`);nodes.forEach(n=>(n.depends_on||[]).forEach(dep=>{{if(!pos[dep]||!pos[n.id])return;const oncp=cpath.has(dep)&&cpath.has(n.id);svg.insertAdjacentHTML('beforeend',`<line x1="${{pos[dep].x+150}}" y1="${{pos[dep].y+28}}" x2="${{pos[n.id].x}}" y2="${{pos[n.id].y+28}}" stroke="${{oncp?'#7aa2ff':'#59636f'}}" stroke-width="${{oncp?3:2}}"/>`)}}));const NS='http://www.w3.org/2000/svg';nodes.forEach(n=>{{let p=pos[n.id];let g=document.createElementNS(NS,'g');g.setAttribute('class','node '+n.status+(cpath.has(n.id)?' cp':''));let rect=document.createElementNS(NS,'rect');rect.setAttribute('x',p.x);rect.setAttribute('y',p.y);rect.setAttribute('width',150);rect.setAttribute('height',56);rect.setAttribute('rx',9);let t1=document.createElementNS(NS,'text');t1.setAttribute('x',p.x+10);t1.setAttribute('y',p.y+22);t1.textContent=n.id;let t2=document.createElementNS(NS,'text');t2.setAttribute('x',p.x+10);t2.setAttribute('y',p.y+42);t2.textContent=n.status+(n.cache_hit?' · cache':'');g.append(rect,t1,t2);g.onclick=()=>{{const src=(data.usage&&data.usage.sources||[]).filter(u=>u.node===n.id);const tok=src.reduce((a,u)=>a+(u.input||0)+(u.output||0),0);details.textContent=JSON.stringify(n,null,2)+(tok?`\\n\\nTokens recorded for this node: ${{tok.toLocaleString()}}`:'')}};svg.appendChild(g)}});
 const esc=v=>String(v).replace(/[&<>"']/g,c=>'&#'+c.charCodeAt(0)+';');const tl=document.getElementById('timeline');const timed=nodes.filter(n=>n.started_epoch);if(!timed.length){{tl.innerHTML='<span class="muted">No timing recorded yet</span>'}}else{{const nowS=Date.now()/1000;const t0=Math.min(...timed.map(n=>n.started_epoch));const t1=Math.max(...timed.map(n=>n.ended_epoch||nowS));const span=Math.max(t1-t0,0.001);timed.forEach(n=>{{const end=n.ended_epoch||t1;const left=(n.started_epoch-t0)/span*100;const width=Math.max((end-n.started_epoch)/span*100,1);tl.insertAdjacentHTML('beforeend',`<div class="lane"><span class="lname">${{esc(n.id)}}</span><div class="track"><div class="bar ${{esc(n.status)}}" style="left:${{left.toFixed(2)}}%;width:${{width.toFixed(2)}}%"></div></div><span class="ldur">${{n.duration_ms?(n.duration_ms/1000).toFixed(1)+'s':''}}</span></div>`)}})}}</script></main></body></html>'''
-    (out/'graph.html').write_text(page)
+    (out/'graph.html').write_text(page, encoding='utf-8')
 
 def cmd_render(a):
     p,d=load(a.run); render_files(p,d); print(p.parent/'graph.html')
@@ -230,7 +230,7 @@ def detect_quality_commands():
     candidates=[]
     if Path('package.json').exists():
         try:
-            pkg=json.loads(Path('package.json').read_text()); scripts=pkg.get('scripts',{})
+            pkg=json.loads(Path('package.json').read_text(encoding='utf-8')); scripts=pkg.get('scripts',{})
             for name in ('lint','typecheck','test'):
                 if name in scripts: candidates.append(f'npm run {name} --if-present')
         except Exception: pass
@@ -286,14 +286,14 @@ def cmd_cache_key(a):
 def cmd_cache_get(a):
     p,d=load(a.run); key=cache_key(d['task'],a.node,a.files or [],a.version); cp=CACHE/f'{key}.json'
     if not cp.exists(): print('MISS'); raise SystemExit(2)
-    item=json.loads(cp.read_text()); n=get_node(d,a.node)
+    item=json.loads(cp.read_text(encoding='utf-8')); n=get_node(d,a.node)
     if n: n.update({'status':'cached','cache_hit':True,'cache_key':key,'updated_at':now()})
     d['events'].append({'at':now(),'type':'cache_hit','message':a.node});save(p,d);render_files(p,d);print(json.dumps(item,indent=2))
 
 def cmd_cache_put(a):
     p,d=load(a.run); key=cache_key(d['task'],a.node,a.files or [],a.version); CACHE.mkdir(parents=True,exist_ok=True)
     value={'key':key,'run':a.run,'node':a.node,'created_at':now(),'files':a.files or [],'result':a.result}
-    (CACHE/f'{key}.json').write_text(json.dumps(value,indent=2)+'\n'); n=get_node(d,a.node)
+    (CACHE/f'{key}.json').write_text(json.dumps(value,indent=2)+'\n', encoding='utf-8'); n=get_node(d,a.node)
     if n: n['cache_key']=key
     save(p,d);render_files(p,d);print(key)
 
@@ -332,7 +332,7 @@ def cmd_resume(a):
     candidates=[]
     for p in ROOT.glob('*/state.json'):
         try:
-            d=json.loads(p.read_text())
+            d=json.loads(p.read_text(encoding='utf-8'))
             if d.get('status') not in ('complete','passed'): candidates.append((p.stat().st_mtime,d))
         except Exception: pass
     candidates=[c for c in candidates if not c[1].get('finished_at')]
