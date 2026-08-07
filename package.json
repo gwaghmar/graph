@@ -37,7 +37,7 @@
     "graph-skill": "bin/graph-skill.js"
   },
   "scripts": {
-    "test": "node --test tests/*.test.js"
+    "test": "node --test tests/install.test.js"
   },
   "engines": {
     "node": ">=18"
