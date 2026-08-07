@@ -4,6 +4,24 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-07
+
+### Added
+- **Timeline view** in the HTML report — a Gantt-style lane per node built from recorded start/end times, showing actual parallelism and bottlenecks.
+- **Critical path** — computed locally (longest cumulative-duration dependency chain, falling back to longest chain when no durations exist yet), highlighted in the report's execution graph, shown in the report header, and printed in the final run summary.
+- **Live auto-refresh** — the HTML report refreshes itself every 2 seconds while the run is in progress and stops once the run finishes, making the "live report" genuinely live without a server.
+- `graph.py validate` — deterministic plan gate that exits non-zero on unknown, self, or cyclic dependencies. All five host adapters now run it after recording the plan, before executing any node.
+- `graph.py cache-prune [--days N]` — removes cache entries older than N days (default 30); the cache no longer grows unbounded.
+- Per-node token drill-down in the report — clicking a node shows its recorded token usage alongside its state.
+- Wall-clock duration (`wall_ms`) tracked separately from summed per-node compute time; the summary now reports both, so parallel runs no longer look slower than they were.
+- Planner/reviewer agent guidance updated per current multi-agent research: decompose along context boundaries rather than lifecycle phases, pin cross-cutting decisions (interfaces, naming, file ownership) in the plan, and review against acceptance criteria only.
+- CI now also runs on Windows and Node 24.
+
+### Fixed
+- HTML report no longer clips large graphs — the SVG viewBox is sized to the laid-out graph instead of a hardcoded 900×500, which cut off nodes beyond four dependency levels (the documented full protocol produces six).
+- Mermaid node labels use `<br/>` instead of a literal `\n`, which Mermaid does not render as a line break.
+- `quality` auto-detection no longer crashes when `python3` is not on PATH (uses the running interpreter to probe for pytest); `init` no longer crashes when `git` is missing.
+
 ## [0.5.0] - 2026-07-27
 
 ### Added

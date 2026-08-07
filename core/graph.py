@@ -106,7 +106,7 @@ def cmd_usage(a):
 def mermaid(d):
     lines=['flowchart LR']
     for n in d.get('nodes',[]):
-        label=f"{n['id']}\\n{n.get('role','')}\\n{n.get('status','')}".replace('"','#quot;')
+        label=f"{n['id']}<br/>{n.get('role','')}<br/>{n.get('status','')}".replace('"','#quot;')
         lines.append(f'  {safe_id(n["id"])}["{label}"]')
     for n in d.get('nodes',[]):
         for dep in n.get('depends_on',[]): lines.append(f'  {safe_id(dep)} --> {safe_id(n["id"])}')
@@ -116,10 +116,13 @@ def stats(d):
     nodes=d.get('nodes',[]); statuses={}
     for n in nodes: statuses[n.get('status','unknown')]=statuses.get(n.get('status','unknown'),0)+1
     duration=sum(n.get('duration_ms',0) or 0 for n in nodes)
+    starts=[n['started_epoch'] for n in nodes if n.get('started_epoch')]
+    ends=[n.get('ended_epoch') or epoch() for n in nodes if n.get('started_epoch')]
+    wall=round((max(ends)-min(starts))*1000) if starts else 0
     return {'nodes':len(nodes),'completed':sum(statuses.get(x,0) for x in ('complete','passed','cached','skipped')),
             'failed':statuses.get('failed',0),'retries':sum(max(0,n.get('attempts',0)-1) for n in nodes),
             'cache_hits':sum(1 for n in nodes if n.get('cache_hit') or n.get('status')=='cached'),
-            'files_changed':len({f for n in nodes for f in n.get('files',[])}),'duration_ms':duration}
+            'files_changed':len({f for n in nodes for f in n.get('files',[])}),'duration_ms':duration,'wall_ms':wall}
 
 GLYPHS={'complete':'✔','passed':'✔','cached':'⚡','failed':'✖','running':'▶','retrying':'↻','pending':'○','skipped':'~'}
 
@@ -143,6 +146,25 @@ def node_levels(d):
         return levels[n['id']]
     for n in nodes: level(n)
     return levels
+
+def critical_path(d):
+    """Longest cumulative-duration dependency chain: (total_ms, [node ids])."""
+    nodes=d.get('nodes',[]); by={n['id']:n for n in nodes}; memo={}
+    def cost(nid,seen=frozenset()):
+        if nid in memo: return memo[nid]
+        n=by.get(nid)
+        if not n or nid in seen: return (0,[])
+        best=(0,[])
+        for dep in n.get('depends_on',[]):
+            c=cost(dep,seen|{nid})
+            if (c[0],len(c[1]))>(best[0],len(best[1])): best=c
+        memo[nid]=(best[0]+(n.get('duration_ms') or 0),best[1]+[nid])
+        return memo[nid]
+    best=(0,[])
+    for n in nodes:
+        c=cost(n['id'])
+        if (c[0],len(c[1]))>(best[0],len(best[1])): best=c
+    return best
 
 def ascii_graph(d):
     nodes=d.get('nodes',[]); levels=node_levels(d); s=stats(d)
@@ -173,7 +195,9 @@ def summary_text(d):
         lines+= [f"  {'✔' if q.get('status')=='passed' else '✖'} {q.get('command','')} · {q.get('duration_ms',0)}ms" for q in checks]
     files=sorted({f for n in d.get('nodes',[]) for f in n.get('files',[])})
     if files: lines.append(f"Files ({len(files)}): "+', '.join(files))
-    lines.append(f"Stats: retries {s['retries']} · cache hits {s['cache_hits']} · duration {s['duration_ms']/1000:.1f}s · tokens recorded {total:,}{' (estimated)' if usage.get('estimated') else ''}")
+    cp_ms,cp_nodes=critical_path(d)
+    if len(cp_nodes)>1: lines.append(f"Critical path: {' → '.join(cp_nodes)} · {cp_ms/1000:.1f}s")
+    lines.append(f"Stats: retries {s['retries']} · cache hits {s['cache_hits']} · wall {s['wall_ms']/1000:.1f}s · compute {s['duration_ms']/1000:.1f}s · tokens recorded {total:,}{' (estimated)' if usage.get('estimated') else ''}")
     lines.append(f"Report: {ROOT/d['id']/'graph.html'}")
     lines.append(rule)
     return '\n'.join(lines)
@@ -181,14 +205,22 @@ def summary_text(d):
 def render_files(p,d):
     out=p.parent; mm=mermaid(d); (out/'graph.mmd').write_text(mm)
     s=stats(d); usage=d.get('usage',{}); total=usage.get('input_tokens',0)+usage.get('output_tokens',0)
+    running=not d.get('finished_at') and d.get('status') not in ('complete','passed','failed')
+    refresh='<meta http-equiv="refresh" content="2">' if running else ''
+    live=' · <span class="live">● live — refreshes every 2s</span>' if running else ''
+    cp_ms,cp_nodes=critical_path(d)
+    cp_json=json.dumps(cp_nodes).replace('<','\\u003c')
+    cp_line=f' · Critical path: {html.escape(" → ".join(cp_nodes))} ({cp_ms/1000:.1f}s)' if len(cp_nodes)>1 else ''
     payload=json.dumps(d).replace('<','\\u003c')
-    page=f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Graph run {html.escape(d['id'])}</title>
-<style>body{{font-family:Inter,system-ui;background:#0b0d10;color:#e8eaed;margin:0}}main{{max-width:1200px;margin:auto;padding:28px}}.grid{{display:grid;grid-template-columns:2fr 1fr;gap:18px}}.card{{background:#15191f;border:1px solid #2a3038;border-radius:14px;padding:18px}}.stats{{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin:16px 0}}.stat{{background:#15191f;border:1px solid #2a3038;border-radius:10px;padding:12px}}.node{{cursor:pointer}}.node rect{{fill:#20262e;stroke:#59636f;stroke-width:2}}.node.passed rect,.node.complete rect,.node.cached rect{{stroke:#52b788}}.node.failed rect{{stroke:#ff6b6b}}.node.running rect,.node.retrying rect{{stroke:#ffd166}}.node.skipped rect{{stroke:#9aa0a6;stroke-dasharray:4}}text{{fill:#e8eaed;font-size:12px}}pre{{white-space:pre-wrap}}table{{width:100%;border-collapse:collapse}}td,th{{border-bottom:1px solid #2a3038;padding:8px;text-align:left}}small,.muted{{color:#9aa0a6}}@media(max-width:800px){{.grid{{grid-template-columns:1fr}}.stats{{grid-template-columns:repeat(2,1fr)}}}}</style></head><body><main>
-<h1>Graph run {html.escape(d['id'])}</h1><p>{html.escape(d['task'])}</p><p class="muted">Host: {html.escape(str(d.get('host') or 'unknown'))} · Updated: {html.escape(d.get('updated_at',''))} · Tokens recorded: {total:,}{' estimated' if usage.get('estimated') else ''}</p>
+    page=f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">{refresh}<title>Graph run {html.escape(d['id'])}</title>
+<style>body{{font-family:Inter,system-ui;background:#0b0d10;color:#e8eaed;margin:0}}main{{max-width:1200px;margin:auto;padding:28px}}.grid{{display:grid;grid-template-columns:2fr 1fr;gap:18px}}.card{{background:#15191f;border:1px solid #2a3038;border-radius:14px;padding:18px}}.stats{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:16px 0}}.stat{{background:#15191f;border:1px solid #2a3038;border-radius:10px;padding:12px}}.node{{cursor:pointer}}.node rect{{fill:#20262e;stroke:#59636f;stroke-width:2}}.node.passed rect,.node.complete rect,.node.cached rect{{stroke:#52b788}}.node.failed rect{{stroke:#ff6b6b}}.node.running rect,.node.retrying rect{{stroke:#ffd166}}.node.skipped rect{{stroke:#9aa0a6;stroke-dasharray:4}}.node.cp rect{{stroke-width:3.5}}text{{fill:#e8eaed;font-size:12px}}pre{{white-space:pre-wrap}}table{{width:100%;border-collapse:collapse}}td,th{{border-bottom:1px solid #2a3038;padding:8px;text-align:left}}small,.muted{{color:#9aa0a6}}.live{{color:#ffd166}}.lane{{display:grid;grid-template-columns:minmax(120px,220px) 1fr 64px;gap:10px;align-items:center;margin:6px 0;font-size:12px}}.lname{{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}.ldur{{color:#9aa0a6;text-align:right}}.track{{position:relative;height:14px;background:#20262e;border-radius:7px;overflow:hidden}}.bar{{position:absolute;top:0;height:100%;border-radius:7px;background:#59636f}}.bar.complete,.bar.passed,.bar.cached{{background:#52b788}}.bar.failed{{background:#ff6b6b}}.bar.running,.bar.retrying{{background:#ffd166}}@media(max-width:800px){{.grid{{grid-template-columns:1fr}}.stats{{grid-template-columns:repeat(2,1fr)}}}}</style></head><body><main>
+<h1>Graph run {html.escape(d['id'])}</h1><p>{html.escape(d['task'])}</p><p class="muted">Host: {html.escape(str(d.get('host') or 'unknown'))} · Updated: {html.escape(d.get('updated_at',''))} · Tokens recorded: {total:,}{' estimated' if usage.get('estimated') else ''}{cp_line}{live}</p>
 <div class="stats">{''.join(f'<div class="stat"><small>{k.replace("_"," ").title()}</small><div><b>{v:,}</b></div></div>' for k,v in s.items())}</div>
 <div class="grid"><section class="card"><h2>Execution graph</h2><svg id="graph" width="100%" viewBox="0 0 900 500"></svg></section><aside class="card"><h2>Node details</h2><pre id="details">Select a node</pre></aside></div>
+<section class="card" style="margin-top:18px"><h2>Timeline</h2><div id="timeline"></div></section>
 <section class="card" style="margin-top:18px"><h2>Quality checks</h2><table><thead><tr><th>Command</th><th>Status</th><th>Duration</th></tr></thead><tbody>{''.join(f'<tr><td>{html.escape(q.get("command",""))}</td><td>{html.escape(q.get("status",""))}</td><td>{q.get("duration_ms",0)} ms</td></tr>' for q in d.get('quality',[])) or '<tr><td colspan="3">No checks recorded</td></tr>'}</tbody></table></section>
-<script>const data={payload};const svg=document.getElementById('graph'),details=document.getElementById('details');const nodes=data.nodes||[];const levels={{}};function level(n,seen=new Set()){{if(levels[n.id]!=null)return levels[n.id];if(seen.has(n.id))return 0;seen.add(n.id);let deps=n.depends_on||[];return levels[n.id]=deps.length?1+Math.max(...deps.map(id=>{{let d=nodes.find(x=>x.id===id);return d?level(d,new Set(seen)):0}})):0}}nodes.forEach(n=>level(n));let by={{}};nodes.forEach(n=>(by[levels[n.id]]??=[]).push(n));let pos={{}};Object.keys(by).forEach(l=>by[l].forEach((n,i)=>pos[n.id]={{x:40+Number(l)*210,y:40+i*95}}));nodes.forEach(n=>(n.depends_on||[]).forEach(dep=>{{if(!pos[dep]||!pos[n.id])return;svg.insertAdjacentHTML('beforeend',`<line x1="${{pos[dep].x+150}}" y1="${{pos[dep].y+28}}" x2="${{pos[n.id].x}}" y2="${{pos[n.id].y+28}}" stroke="#59636f" stroke-width="2"/>`)}}));const NS='http://www.w3.org/2000/svg';nodes.forEach(n=>{{let p=pos[n.id];let g=document.createElementNS(NS,'g');g.setAttribute('class','node '+n.status);let rect=document.createElementNS(NS,'rect');rect.setAttribute('x',p.x);rect.setAttribute('y',p.y);rect.setAttribute('width',150);rect.setAttribute('height',56);rect.setAttribute('rx',9);let t1=document.createElementNS(NS,'text');t1.setAttribute('x',p.x+10);t1.setAttribute('y',p.y+22);t1.textContent=n.id;let t2=document.createElementNS(NS,'text');t2.setAttribute('x',p.x+10);t2.setAttribute('y',p.y+42);t2.textContent=n.status+(n.cache_hit?' · cache':'');g.append(rect,t1,t2);g.onclick=()=>details.textContent=JSON.stringify(n,null,2);svg.appendChild(g)}});</script></main></body></html>'''
+<script>const data={payload};const cpath=new Set({cp_json});const svg=document.getElementById('graph'),details=document.getElementById('details');const nodes=data.nodes||[];const levels={{}};function level(n,seen=new Set()){{if(levels[n.id]!=null)return levels[n.id];if(seen.has(n.id))return 0;seen.add(n.id);let deps=n.depends_on||[];return levels[n.id]=deps.length?1+Math.max(...deps.map(id=>{{let d=nodes.find(x=>x.id===id);return d?level(d,new Set(seen)):0}})):0}}nodes.forEach(n=>level(n));let by={{}};nodes.forEach(n=>(by[levels[n.id]]??=[]).push(n));let pos={{}};Object.keys(by).forEach(l=>by[l].forEach((n,i)=>pos[n.id]={{x:40+Number(l)*210,y:40+i*95}}));const ps=Object.values(pos);if(ps.length)svg.setAttribute('viewBox',`0 0 ${{Math.max(600,...ps.map(q=>q.x+190))}} ${{Math.max(200,...ps.map(q=>q.y+96))}}`);nodes.forEach(n=>(n.depends_on||[]).forEach(dep=>{{if(!pos[dep]||!pos[n.id])return;const oncp=cpath.has(dep)&&cpath.has(n.id);svg.insertAdjacentHTML('beforeend',`<line x1="${{pos[dep].x+150}}" y1="${{pos[dep].y+28}}" x2="${{pos[n.id].x}}" y2="${{pos[n.id].y+28}}" stroke="${{oncp?'#7aa2ff':'#59636f'}}" stroke-width="${{oncp?3:2}}"/>`)}}));const NS='http://www.w3.org/2000/svg';nodes.forEach(n=>{{let p=pos[n.id];let g=document.createElementNS(NS,'g');g.setAttribute('class','node '+n.status+(cpath.has(n.id)?' cp':''));let rect=document.createElementNS(NS,'rect');rect.setAttribute('x',p.x);rect.setAttribute('y',p.y);rect.setAttribute('width',150);rect.setAttribute('height',56);rect.setAttribute('rx',9);let t1=document.createElementNS(NS,'text');t1.setAttribute('x',p.x+10);t1.setAttribute('y',p.y+22);t1.textContent=n.id;let t2=document.createElementNS(NS,'text');t2.setAttribute('x',p.x+10);t2.setAttribute('y',p.y+42);t2.textContent=n.status+(n.cache_hit?' · cache':'');g.append(rect,t1,t2);g.onclick=()=>{{const src=(data.usage&&data.usage.sources||[]).filter(u=>u.node===n.id);const tok=src.reduce((a,u)=>a+(u.input||0)+(u.output||0),0);details.textContent=JSON.stringify(n,null,2)+(tok?`\\n\\nTokens recorded for this node: ${{tok.toLocaleString()}}`:'')}};svg.appendChild(g)}});
+const esc=v=>String(v).replace(/[&<>"']/g,c=>'&#'+c.charCodeAt(0)+';');const tl=document.getElementById('timeline');const timed=nodes.filter(n=>n.started_epoch);if(!timed.length){{tl.innerHTML='<span class="muted">No timing recorded yet</span>'}}else{{const nowS=Date.now()/1000;const t0=Math.min(...timed.map(n=>n.started_epoch));const t1=Math.max(...timed.map(n=>n.ended_epoch||nowS));const span=Math.max(t1-t0,0.001);timed.forEach(n=>{{const end=n.ended_epoch||t1;const left=(n.started_epoch-t0)/span*100;const width=Math.max((end-n.started_epoch)/span*100,1);tl.insertAdjacentHTML('beforeend',`<div class="lane"><span class="lname">${{esc(n.id)}}</span><div class="track"><div class="bar ${{esc(n.status)}}" style="left:${{left.toFixed(2)}}%;width:${{width.toFixed(2)}}%"></div></div><span class="ldur">${{n.duration_ms?(n.duration_ms/1000).toFixed(1)+'s':''}}</span></div>`)}})}}</script></main></body></html>'''
     (out/'graph.html').write_text(page)
 
 def cmd_render(a):
@@ -205,7 +237,9 @@ def detect_quality_commands():
     tests_dir=Path('tests')
     has_py_tests=tests_dir.is_dir() and (any(tests_dir.rglob('test_*.py')) or any(tests_dir.rglob('*_test.py')) or (tests_dir/'conftest.py').exists())
     wants_pytest=Path('pyproject.toml').exists() or Path('pytest.ini').exists() or has_py_tests
-    if wants_pytest and subprocess.run(['python3','-c','import pytest'],capture_output=True).returncode==0: candidates.append('python3 -m pytest -q')
+    if wants_pytest:
+        with contextlib.suppress(OSError):
+            if subprocess.run([sys.executable,'-c','import pytest'],capture_output=True).returncode==0: candidates.append(f'"{sys.executable}" -m pytest -q')
     if Path('Cargo.toml').exists(): candidates.append('cargo test --quiet')
     if Path('go.mod').exists(): candidates.append('go test ./...')
     return candidates
@@ -263,6 +297,31 @@ def cmd_cache_put(a):
     if n: n['cache_key']=key
     save(p,d);render_files(p,d);print(key)
 
+def cmd_validate(a):
+    _,d=load(a.run); nodes=d.get('nodes',[]); ids={n['id'] for n in nodes}; problems=[]
+    for n in nodes:
+        for dep in n.get('depends_on',[]):
+            if dep==n['id']: problems.append(f"self-dependency: {n['id']}")
+            elif dep not in ids: problems.append(f"unknown dependency: {n['id']} ← {dep}")
+    graph={n['id']:[dep for dep in n.get('depends_on',[]) if dep in ids and dep!=n['id']] for n in nodes}
+    done=set()
+    def visit(nid,path):
+        if nid in done: return
+        if nid in path:
+            problems.append('cycle: '+' → '.join(path[path.index(nid):]+[nid])); return
+        for dep in graph.get(nid,[]): visit(dep,path+[nid])
+        done.add(nid)
+    for nid in graph: visit(nid,[])
+    if problems:
+        print('\n'.join(f'✖ {x}' for x in problems)); raise SystemExit(1)
+    print(f'✔ plan valid: {len(nodes)} nodes, all dependencies known, no cycles')
+
+def cmd_cache_prune(a):
+    cutoff=epoch()-a.days*86400; removed=0
+    for f in CACHE.glob('*.json'):
+        if f.stat().st_mtime<cutoff: f.unlink(); removed+=1
+    print(f'Removed {removed} cache entries older than {a.days} days')
+
 def cmd_retry_plan(a):
     _,d=load(a.run); failed=[n['id'] for n in d.get('nodes',[]) if n.get('status')=='failed']
     selected=descendants(d,failed) if a.include_dependents else set(failed)
@@ -282,7 +341,9 @@ def cmd_resume(a):
 
 def git_info():
     def run(*args):
-        r=subprocess.run(['git',*args],text=True,capture_output=True); return r.stdout.strip() if r.returncode==0 else None
+        try: r=subprocess.run(['git',*args],text=True,capture_output=True)
+        except OSError: return None
+        return r.stdout.strip() if r.returncode==0 else None
     return {'commit':run('rev-parse','HEAD'),'branch':run('branch','--show-current'),'dirty':bool(run('status','--porcelain'))}
 
 def cmd_commit(a):
@@ -314,6 +375,8 @@ def main():
     x=sp.add_parser('cache-key');x.add_argument('run');x.add_argument('node');x.add_argument('--files',nargs='*');x.add_argument('--version',default='1');x.set_defaults(fn=cmd_cache_key,nolock=True)
     x=sp.add_parser('cache-get');x.add_argument('run');x.add_argument('node');x.add_argument('--files',nargs='*');x.add_argument('--version',default='1');x.set_defaults(fn=cmd_cache_get)
     x=sp.add_parser('cache-put');x.add_argument('run');x.add_argument('node');x.add_argument('result');x.add_argument('--files',nargs='*');x.add_argument('--version',default='1');x.set_defaults(fn=cmd_cache_put)
+    x=sp.add_parser('validate');x.add_argument('run');x.set_defaults(fn=cmd_validate,nolock=True)
+    x=sp.add_parser('cache-prune');x.add_argument('--days',type=int,default=30);x.set_defaults(fn=cmd_cache_prune,nolock=True)
     x=sp.add_parser('retry-plan');x.add_argument('run');x.add_argument('--include-dependents',action='store_true');x.set_defaults(fn=cmd_retry_plan,nolock=True)
     x=sp.add_parser('resume');x.set_defaults(fn=cmd_resume)
     x=sp.add_parser('commit');x.add_argument('run');x.add_argument('--message');x.add_argument('--yes',action='store_true');x.set_defaults(fn=cmd_commit)

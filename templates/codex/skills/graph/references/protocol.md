@@ -4,6 +4,8 @@ Plan node fields: `id`, `role`, `description`, `depends_on`, `file_scope`, `acce
 
 Allowed statuses: `pending`, `running`, `retrying`, `passed`, `complete`, `cached`, `failed`, `skipped`. The runtime counts `passed`, `complete`, `cached`, and `skipped` as terminal success and `failed` as terminal failure.
 
+Deterministic plan gate: `graph.py validate <run>` fails on unknown, self, or cyclic dependencies. It must pass before any implementation node starts.
+
 Plan review passes only when requirements are mapped, dependencies are valid, scopes do not conflict, validation is executable, and risky operations have rollback.
 
 Implementation review severity: critical, high, medium, low. A run fails on unresolved critical/high issues, failing required tests, or unmet acceptance criteria.

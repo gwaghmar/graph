@@ -7,7 +7,7 @@ alwaysApply: false
 When the user invokes @graph:
 - Size first: estimate files to change (F), design decisions (D), cross-cutting risk (R). F ≤ 1 with no D/R → one implementation node plus local quality checks, no planner or reviewer agents. F 2–4 or D = 1 → 2–3 nodes, at most one reviewer. F ≥ 5, D ≥ 2, or R → full planner/workers/reviewer protocol, one worker per independent file cluster.
 - Initialize a run, or resume the latest incomplete run when requested.
-- Record planning, implementation, checks, review, and synthesis nodes.
+- Record planning, implementation, checks, review, and synthesis nodes, then run `.graph/graph.py validate` and fix the plan if it reports unknown or cyclic dependencies.
 - Check the local content cache before any avoidable model call.
 - Run local quality gates before model reviewers.
 - Retry only failed nodes and dependent nodes, maximum twice.

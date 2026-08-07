@@ -19,7 +19,7 @@ The full protocol below is for M and L tiers.
 
 Protocol:
 1. If `--resume` is present, run `python3 .graph/graph.py resume` and continue that incomplete run. Otherwise initialize with `python3 .graph/graph.py init "$ARGUMENTS" --host claude`.
-2. Inspect the repository and create planner, plan-review, implementation, validation, and synthesis nodes. Record every transition with `.graph/graph.py node`. Each `node` call prints a live ASCII graph of the run and refreshes the HTML report — both are rendered locally and cost no model tokens. Do not re-describe the graph in prose; the printed tree is the progress display (`.graph/graph.py tree <run>` reprints it on demand).
+2. Inspect the repository and create planner, plan-review, implementation, validation, and synthesis nodes. Record every transition with `.graph/graph.py node`. Each `node` call prints a live ASCII graph of the run and refreshes the HTML report — both are rendered locally and cost no model tokens. Do not re-describe the graph in prose; the printed tree is the progress display (`.graph/graph.py tree <run>` reprints it on demand). After recording the planned nodes, run `python3 .graph/graph.py validate <run>` — it exits non-zero on unknown, self, or cyclic dependencies; fix the plan before executing anything.
 3. Before executing a node, query the local cache with `.graph/graph.py cache-get <run> <node> --files <relevant-files>`. Reuse a hit. Do not call an agent for a valid cached result.
 4. Use `graph-planner`, then critique the plan. Delegate only independent, non-overlapping work.
 5. Run local checks before reviewer agents with `.graph/graph.py quality <run>`. If deterministic checks prove the result, skip redundant review calls.

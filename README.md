@@ -59,6 +59,8 @@ Graph engineering fixes this by treating a coding task as a **dependency graph**
 
 Graph Skill brings this directly into the coding assistant you already use — one install command, no orchestration framework, no separate service to run.
 
+The approach has a research pedigree: planning tool calls as a dependency graph and dispatching independent nodes in parallel is the architecture of [LLMCompiler (ICML 2024)](https://arxiv.org/abs/2312.04511), which reported large latency and cost reductions over sequential agent loops. Graph Skill applies the same idea to whole coding tasks, adding local caching, deterministic validation, and selective retries on top.
+
 ## How a run looks
 
 ```mermaid
@@ -123,13 +125,16 @@ Optional flags:
 **Live and local, every run:**
 - **Live text graph** — every node state transition prints a compact rendering of the run graph: progress bar, status glyphs (`✔ ▶ ↻ ✖ ⚡ ○`), tree connectors, per-node roles and durations, retries, cache hits, and recorded tokens. Rendered locally in Python — zero model tokens. Reprint any time: `.graph/graph.py tree <run>`.
 - **Final run summary** — a complete recap: task, final node graph, quality checks, files touched, retries, cache hits, duration, recorded tokens, and the report path. `.graph/graph.py summary <run>`.
-- **Interactive HTML report** — `.graph/runs/<run-id>/graph.html` rewrites on every state change; reload it in a browser for nodes, dependencies, duration, files, retries, cache hits, and checks.
+- **Interactive HTML report** — `.graph/runs/<run-id>/graph.html` rewrites on every state change and **auto-refreshes in the browser while the run is live**. Nodes, dependencies, durations, files, retries, cache hits, per-node tokens, and checks.
+- **Timeline view** — a Gantt-style lane per node in the HTML report, showing when each node actually ran and how much of the run was truly parallel.
+- **Critical path** — the longest dependency chain by duration is computed locally, highlighted in the report, and printed in the run summary, so you can see exactly what bounded the wall-clock time.
+- **Plan validation** — `graph.py validate` deterministically rejects unknown, self, or cyclic dependencies before any implementation node runs. No tokens spent executing a malformed plan.
 - **Smart retry** — reruns only failed nodes and their dependents.
 - **Local quality gates** — auto-detects npm lint/typecheck/test, pytest, Cargo, or Go tests, and runs them before spending tokens on a reviewer.
 - **Content cache** — reuses successful nodes when the task and relevant file contents are unchanged.
 - **Resume** — continues the latest incomplete run.
 - **Optional commit** — commits only with explicit `--commit` permission.
-- **Local statistics** — completed nodes, failures, retries, cache hits, changed files, execution duration.
+- **Local statistics** — completed nodes, failures, retries, cache hits, changed files, and both wall-clock and summed compute duration.
 
 All reporting, checks, retry planning, cache lookup, and graph rendering run **locally** and use **no model tokens**. Token counts are shown only when the host actually exposes real usage data — most don't, so you'll see `0` rather than a made-up number.
 
@@ -150,11 +155,13 @@ Each adapter is a thin prompt/rule file pointing at the same shared `.graph/` ru
 ```bash
 python3 .graph/graph.py init "demo" --host codex
 python3 .graph/graph.py node RUN planner --role planner --status running
+python3 .graph/graph.py validate RUN  # reject unknown/cyclic dependencies before executing
 python3 .graph/graph.py quality RUN
 python3 .graph/graph.py retry-plan RUN --include-dependents
 python3 .graph/graph.py resume
 python3 .graph/graph.py tree RUN      # live ASCII graph
-python3 .graph/graph.py summary RUN   # final run summary
+python3 .graph/graph.py summary RUN   # final run summary (incl. critical path)
+python3 .graph/graph.py cache-prune --days 30
 ```
 
 ## FAQ
