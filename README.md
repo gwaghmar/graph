@@ -29,9 +29,48 @@ No polling, no dashboard, no plugin. That tree is printed straight to stdout by 
 
 ---
 
+## What can it build?
+
+Anything your coding agent can do — Graph Skill doesn't write the code, it **organizes the work** so independent parts run in parallel, failures rerun alone, and finished parts never get redone. Type the task, get a graph:
+
+```text
+/graph Build a todo webapp with auth and a REST API
+```
+
+```mermaid
+flowchart LR
+  P[planner] --> PR[plan review]
+  PR --> S[scaffold project]
+  S --> M[data models]
+  S --> A[API routes]
+  S --> U[UI components]
+  M --> W[wire-up + integration]
+  A --> W
+  U --> W
+  W --> Q[lint · types · tests<br/>local, zero tokens]
+  Q --> V[reviewer]
+  V --> D[done + report]
+  style M stroke:#52b788
+  style A stroke:#52b788
+  style U stroke:#52b788
+  style Q stroke:#ffd166
+```
+
+The three green nodes touch **disjoint files**, so they run as parallel workers. Everything waits on the scaffold, integration waits on all three, and deterministic checks run before any AI reviewer spends a token. If `API routes` fails its tests, only it and `wire-up` rerun — models, UI, and scaffold are kept.
+
+| You ask for | The graph it builds |
+|---|---|
+| **A new feature** ("add CSV export") | backend node + frontend node in parallel → tests → review. Its home turf. |
+| **A whole webapp** | scaffold first, then models/API/UI fan out in parallel, converge on integration (diagram above). |
+| **Research / analysis** | read-only nodes are always independent — sources fan out wide, one synthesis node merges them. |
+| **A one-line fix** | no graph at all — sizing tiers skip the overhead when there's nothing to parallelize. |
+
+That last row matters: Graph Skill sizes the graph to the task (files touched × design decisions × risk), so you only pay the multi-agent token cost when parallelism or retry-isolation actually buys you something.
+
 ## Table of contents
 
 - [Why](#why)
+- [What can it build?](#what-can-it-build)
 - [How a run looks](#how-a-run-looks)
 - [Install](#install)
 - [Usage](#usage)
