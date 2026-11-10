@@ -76,6 +76,14 @@ class Rules(GraphCase):
         self.node('a', 'skipped', '--reason', 'not needed')
         self.node('b', 'running')
 
+    def test_cannot_drop_dependencies_while_starting(self):
+        self.init()
+        self.node('a', 'pending', '--check', 'false')
+        self.node('b', 'pending', '--depends-on', 'a')
+        self.node('b', 'running', '--depends-on', code=3)
+        self.node('a', 'running', '--check', 'true', code=3)
+        self.assertEqual([n['status'] for n in self.state()['nodes']], ['pending', 'pending'])
+
     def test_retry_cap_default_is_two(self):
         self.init()
         self.node('a', 'running'); self.node('a', 'failed')

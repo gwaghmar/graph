@@ -133,10 +133,12 @@ def guard(a, d, n):
         die(3, f"Refused: skipping {a.node} needs a reason. Add --reason \"<why>\".")
     old_deps = (n or {}).get('depends_on', [])
     deps = a.depends_on if a.depends_on is not None else old_deps
-    if n is not None and deps != old_deps and not (prev == 'pending' and d.get('status') == 'planning'):
-        die(3, f"Refused: dependencies of {a.node} are locked once the run starts. Plan them before the first node runs.")
-    if n is not None and prev != 'pending' and a.check is not None and a.check != n.get('check'):
-        die(3, f"Refused: the check of {a.node} is locked once the node starts. Set it while the node is pending.")
+    # Plan fields may change only in a planning call: node still pending, run still planning, new status pending.
+    planning_call = prev == 'pending' and a.status == 'pending' and d.get('status') == 'planning'
+    if n is not None and deps != old_deps and not planning_call:
+        die(3, f"Refused: dependencies of {a.node} are locked once planning ends. Set them with --status pending before the first node runs.")
+    if n is not None and a.check is not None and a.check != n.get('check') and not planning_call:
+        die(3, f"Refused: the check of {a.node} is locked once planning ends. Set it with --status pending before the first node runs.")
     if a.status != 'pending':
         waiting = unmet(d, {'depends_on': deps})
         if waiting: die(3, f"Refused: {a.node} cannot move to {a.status}, waiting on {', '.join(waiting)}. Finish those nodes first.")
