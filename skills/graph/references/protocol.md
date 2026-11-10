@@ -9,6 +9,9 @@
 - `validate <run>` rejects unknown, self and cyclic dependencies.
 - `quality <run> [--command C]` runs checks and records the result.
 - `retry-plan <run> --include-dependents` lists nodes to rerun.
+- `export-workflow <run> [--out F]` writes a Claude Code Workflow script.
+- `event <run> <type> <message>` appends a note to the run log.
+- `render <run>` rewrites the run report files.
 - `finish <run> --status complete|failed`, `summary`, `tree`, `status`, `resume`.
 - `preflight --needs a,b [--refresh] [--json]` scans the environment.
 

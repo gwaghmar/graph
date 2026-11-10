@@ -1,7 +1,7 @@
 {
   "name": "graph-skill",
-  "version": "0.6.0",
-  "description": "Auto-detecting graph workflow with local checks, caching, selective retries, resume, and interactive reports",
+  "version": "1.0.0",
+  "description": "Plan gate and run recorder for coding agents: dependency graph rules enforced in code, plus an environment preflight scan",
   "keywords": [
     "claude-code",
     "codex",
@@ -13,7 +13,7 @@
     "workflow",
     "dependency-graph",
     "graph-engineering",
-    "token-efficiency"
+    "preflight"
   ],
   "author": "Govind <govindw007@gmail.com>",
   "repository": {

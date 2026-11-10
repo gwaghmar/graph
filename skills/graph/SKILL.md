@@ -36,7 +36,7 @@ Below, `G` means that command.
 
 On Claude Code with the Workflow tool, prefer `G export-workflow <run>` after `validate`. It writes `.claude/workflows/graph-<run>.js`, one agent per node, run level by level. Each agent calls `G node` itself, so the gates still apply. Run that script with the Workflow tool instead of steps 5 and 6.
 
-Show the final summary to the user.
+Show the final summary to the user (`G summary <run>`). Other commands: `G status <run>`, `G tree <run>`, `G retry-plan <run> --include-dependents`, `G render <run>`, `G event <run> <type> <message>`.
 
 ## Rules
 

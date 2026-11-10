@@ -4,6 +4,29 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-10
+
+Graph is now a plan gate and run recorder. The rules are enforced in code.
+
+### Added
+- Rule enforcement in `graph.py`: a node cannot start before its dependencies finish, retries are capped, `--check` gates completion, and a run cannot finish while work is open or quality failed. Refusals exit 3 with one line.
+- `preflight` scan of installed CLIs, logins, and verification tools, with a job-to-tool picker.
+- `brief` (retry brief for a fresh subagent), `verify-plan`, `next`, and `export-workflow`.
+- One skill folder in the Agent Skills format, a Claude Code plugin, and `update`, `doctor` and `--global` in the installer.
+- Test suite for the runtime and preflight, run on macOS, Linux and Windows.
+- Benchmark scaffold in `bench/`. It has not been run.
+
+### Removed (breaking)
+- Content cache and `cache-prune`.
+- Token ledger and token columns.
+- `--commit` and the commit step.
+- Timeline view and critical path.
+- The per-host adapter files (`.claude/commands/graph.md`, agents, `.cursor/rules/graph.mdc`, `.opencode/commands/graph.md`, `.codex/skills/graph`).
+- The `.graph/graph.py` runtime location. The runtime now lives inside the skill folder.
+
+### Migration
+Run `npx graph-skill install` (or `update`) in each project. It removes old 0.x files that it made and installs the new skill folder. Files it did not make are left in place. Existing run history in `.graph/runs/` is kept. Replace any use of `.graph/graph.py` with the skill path, and drop `--commit`.
+
 ## [0.6.0] - 2026-08-07
 
 ### Added

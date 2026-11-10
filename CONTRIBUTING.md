@@ -5,29 +5,33 @@
 No build step. Clone the repo and run the test suite:
 
 ```bash
-npm test
+node --test tests/
+python3 -m unittest discover -s tests -p "test_*.py"
 ```
 
-Requires Node.js 18+ and `python3` on PATH — the tests exercise both the installer (`bin/graph-skill.js`) and the runtime (`skills/graph/scripts/graph.py`).
+`npm test` runs both. Requires Node.js 18+ and Python 3.9+ on PATH. The Node tests cover the installer (`bin/graph-skill.js`). The Python tests cover the runtime (`skills/graph/scripts/graph.py`) and `preflight.py`.
 
 ## Project layout
 
-- `bin/graph-skill.js` — the installer CLI (`npx graph-skill install/uninstall`). Detects the active host and copies the right adapter.
-- `skills/graph/scripts/graph.py` — the shared runtime: run state, caching, quality gates, retries, resume, and report rendering. Framework-free, dependency-free stdlib Python.
-- `templates/<host>/` — one adapter per host (Claude Code, Codex, OpenCode, Cursor). Each is a thin prompt/rule file that points at the same `.graph/` runtime.
-- `tests/install.test.js` — covers install/uninstall across hosts and the runtime's cache/retry/resume/quality/report behavior.
+- `bin/graph-skill.js`: the installer CLI. Copies the skill folder to `.claude/skills/graph` and `.agents/skills/graph`. No dependencies.
+- `skills/graph/SKILL.md` and `references/protocol.md`: the skill the agent reads.
+- `skills/graph/scripts/graph.py`: the runtime. Run state, rule enforcement, checks, reports. Stdlib Python 3.9+ only.
+- `skills/graph/scripts/preflight.py` and `jobs.json`: the environment scan and job-to-tool picker.
+- `.claude-plugin/`: the Claude Code plugin and marketplace files. Keep `plugin.json` version equal to `package.json`.
+- `bench/`: benchmark scaffold. Not run.
+- `tests/`: `install.test.js`, `test_graph.py`, `test_preflight.py`.
 
 ## Making a change
 
-- If you touch `skills/graph/scripts/graph.py`, run `npm test` — it spins up a real run and exercises the CLI end to end.
-- If you touch an adapter's protocol (`templates/*/commands|skills/graph*`), keep the sizing tiers (S/M/L) and the retry/cache/quality steps consistent across hosts — they intentionally mirror each other.
-- Don't add a host-specific feature that the others can't express without discussing it first; the adapters are meant to stay thin and equivalent.
-- Keep `skills/graph/scripts/graph.py` dependency-free — it has to run with a stock `python3`, no pip install step.
+- Rules go in `graph.py` code, not only in SKILL.md. Add a test for each refusal.
+- Keep Python portable: no `shell=True` (except the user check command), use `shutil.which`, `pathlib`, and `encoding='utf-8'`.
+- Every command in the argparse definitions must be listed in SKILL.md or `protocol.md`.
+- Keep the runtime free of third-party packages.
 
 ## Pull requests
 
-- Tests must pass (`npm test`); CI runs the same suite on Node 18/20/22.
-- Describe what changed and why in the PR body — the "why" is what reviewers actually need.
+- Tests must pass (`npm test`). CI runs both suites.
+- Describe what changed and why in the PR body: the "why" is what reviewers actually need.
 - Small, focused PRs over bundled ones.
 
 ## Reporting bugs / requesting features
