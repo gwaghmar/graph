@@ -31,9 +31,21 @@ function copyDir(src, dest) {
 }
 
 function commandExists(name) {
-  const probe = process.platform === 'win32' ? 'where' : 'sh';
-  const probeArgs = process.platform === 'win32' ? [name] : ['-lc', `command -v ${name} >/dev/null 2>&1`];
-  return spawnSync(probe, probeArgs, { stdio: 'ignore' }).status === 0;
+  // Test hook: GRAPH_SKILL_TEST_HOSTS="claude,codex" replaces the PATH lookup.
+  if (process.env.GRAPH_SKILL_TEST_HOSTS !== undefined) {
+    return process.env.GRAPH_SKILL_TEST_HOSTS.split(',').map((x) => x.trim()).includes(name);
+  }
+  const exts = process.platform === 'win32' ? (process.env.PATHEXT || '.EXE;.CMD;.BAT').split(';') : [''];
+  for (const dir of (process.env.PATH || '').split(path.delimiter)) {
+    if (!dir) continue;
+    for (const ext of exts) {
+      try {
+        const full = path.join(dir, name + ext);
+        if (fs.statSync(full).isFile()) return true;
+      } catch (e) { /* not here */ }
+    }
+  }
+  return false;
 }
 
 function hasAny(paths) {

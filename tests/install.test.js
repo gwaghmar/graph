@@ -77,7 +77,7 @@ test('stops instead of guessing when no host is detected', () => {
   assert.match(r.stderr, /Could not detect/);
 });
 
-test('runtime supports cache, smart retry, resume, quality, and interactive report', () => {
+test('runtime supports smart retry, resume, quality, and interactive report', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'graph-runtime-'));
   let r = spawnSync(process.execPath, [bin, 'install', '--target', 'codex'], {cwd: dir, encoding:'utf8', env: cleanEnv(dir)});
   assert.equal(r.status, 0, r.stderr);
@@ -94,17 +94,9 @@ test('runtime supports cache, smart retry, resume, quality, and interactive repo
   r = spawnSync(PY, [py, 'retry-plan', 'testrun', '--include-dependents'], {cwd: dir, encoding:'utf8'});
   assert.equal(r.status, 0, r.stderr);
   assert.deepEqual(JSON.parse(r.stdout).retry, ['worker', 'review']);
-  r = spawnSync(PY, [py, 'cache-put', 'testrun', 'worker', 'done', '--files', 'source.txt'], {cwd: dir, encoding:'utf8'});
+  r = spawnSync(PY, [py, 'quality', 'testrun', '--command', `${PY} -c pass`], {cwd: dir, encoding:'utf8'});
   assert.equal(r.status, 0, r.stderr);
-  r = spawnSync(PY, [py, 'cache-get', 'testrun', 'worker', '--files', 'source.txt'], {cwd: dir, encoding:'utf8'});
-  assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /"result": "done"/);
-  r = spawnSync(PY, [py, 'cache-get', 'testrun', 'worker', '--files', 'missing.txt'], {cwd: dir, encoding:'utf8'});
-  assert.equal(r.status, 2, 'cache miss exits 2');
-  assert.match(r.stdout, /MISS/);
-  r = spawnSync(PY, [py, 'quality', 'testrun', '--command', 'exit 0'], {cwd: dir, encoding:'utf8'});
-  assert.equal(r.status, 0, r.stderr);
-  r = spawnSync(PY, [py, 'quality', 'testrun', '--command', 'exit 1'], {cwd: dir, encoding:'utf8'});
+  r = spawnSync(PY, [py, 'quality', 'testrun', '--command', `${PY} -c "raise SystemExit(1)"`], {cwd: dir, encoding:'utf8'});
   assert.equal(r.status, 1, 'failing check exits 1');
   r = spawnSync(PY, [py, 'resume'], {cwd: dir, encoding:'utf8'});
   assert.equal(JSON.parse(r.stdout).run, 'testrun');
@@ -114,7 +106,7 @@ test('runtime supports cache, smart retry, resume, quality, and interactive repo
   assert.match(r.stdout, /review .*← worker/);
   const liveReport = fs.readFileSync(path.join(dir, '.graph/runs/testrun/graph.html'), 'utf8');
   assert.match(liveReport, /http-equiv="refresh"/, 'report auto-refreshes while the run is live');
-  r = spawnSync(PY, [py, 'node', 'testrun', 'review', '--role', 'reviewer', '--status', 'passed'], {cwd: dir, encoding:'utf8'});
+  r = spawnSync(PY, [py, 'node', 'testrun', 'review', '--role', 'reviewer', '--status', 'complete'], {cwd: dir, encoding:'utf8'});
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /review/, 'node transition prints the live graph');
   r = spawnSync(PY, [py, 'node', 'testrun', '<img src=x onerror=alert(1)>', '--role', 'worker', '--status', 'pending'], {cwd: dir, encoding:'utf8'});
@@ -127,19 +119,16 @@ test('runtime supports cache, smart retry, resume, quality, and interactive repo
   assert.equal(r.status, 1, 'unknown dependency fails validation');
   assert.match(r.stdout, /unknown dependency/);
   r = spawnSync(PY, [py, 'finish', 'testrun', '--status', 'complete'], {cwd: dir, encoding:'utf8'});
+  assert.equal(r.status, 3, 'unfinished nodes refuse a complete finish');
+  r = spawnSync(PY, [py, 'finish', 'testrun', '--status', 'failed'], {cwd: dir, encoding:'utf8'});
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /Graph summary/);
-  assert.match(r.stdout, /Critical path: worker → review/);
   assert.match(r.stdout, /Report: .*graph\.html/);
-  r = spawnSync(PY, [py, 'resume'], {cwd: dir, encoding:'utf8'});
-  assert.notEqual(r.status, 0, 'finished runs are not resumable');
   const report = fs.readFileSync(path.join(dir, '.graph/runs/testrun/graph.html'), 'utf8');
   assert.match(report, /Execution graph/);
   assert.match(report, /Node details/);
-  assert.match(report, /Cache Hits/);
-  assert.match(report, /Timeline/);
+  assert.doesNotMatch(report, /Timeline/);
   assert.doesNotMatch(report, /http-equiv="refresh"/, 'finished reports stop refreshing');
-  r = spawnSync(PY, [py, 'cache-prune', '--days', '0'], {cwd: dir, encoding:'utf8'});
-  assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /Removed 1 cache entries/);
+  r = spawnSync(PY, [py, 'resume'], {cwd: dir, encoding:'utf8'});
+  assert.equal(r.status, 0, 'failed runs can be resumed');
 });
