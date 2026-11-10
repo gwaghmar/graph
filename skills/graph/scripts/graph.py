@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Graph Skill runtime: a plan gate and run recorder. Rules are enforced here, not in prompts."""
 from __future__ import annotations
-import argparse, contextlib, hashlib, html, json, os, re, shlex, shutil, subprocess, sys, time, uuid
+import argparse, contextlib, hashlib, html, io, json, os, re, shlex, shutil, subprocess, sys, time, uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -82,6 +82,7 @@ def descendants(d, roots):
 
 def cmd_init(a):
     if a.max_retries < 0: die(2, '--max-retries must be 0 or more.')
+    if a.skip_preflight is not None and not a.skip_preflight.strip(): die(2, '--skip-preflight needs a reason, for example --skip-preflight "user declined".')
     rid = a.id or uuid.uuid4().hex[:10]
     check_run_id(rid); CTX['run'] = rid
     if (ROOT / rid).exists(): die(3, f'Refused: run {rid} already exists. Pick a new --id, or continue it with "resume".')
@@ -92,6 +93,7 @@ def cmd_init(a):
         'quality_commands': a.quality_command or [], 'status': 'planning', 'created_at': now(), 'updated_at': now(),
         'git': git_info(), 'nodes': [], 'events': [], 'quality': []
     }
+    if a.skip_preflight: data['skip_preflight'] = a.skip_preflight.strip()
     save(p, data); render_files(p, data); print(rid)
 
 def unmet(d, n):
@@ -123,6 +125,68 @@ def run_check(command, timeout):
     if timed_out: code, out = None, out + f'\n[check timed out after {timeout}s]'
     return {'check_exit': code, 'check_output': tail_lines(out), 'check_ms': round((epoch() - started) * 1000)}
 
+def launcher():
+    """The command that starts python on this machine, as SKILL.md says: python3, or py -3 / python on Windows."""
+    if os.name == 'nt': return 'py -3' if shutil.which('py') else 'python'
+    return 'python3' if shutil.which('python3') else shlex.quote(Path(sys.executable or 'python3').as_posix())
+
+def script_ref():
+    """Path of this script: relative to the project root when installed in the project, else absolute."""
+    me = Path(__file__).resolve()
+    with contextlib.suppress(ValueError, OSError):
+        rel = me.relative_to(Path.cwd().resolve()).as_posix()
+        if rel.startswith(('.claude/skills/graph/', '.agents/skills/graph/')): return rel
+    return me.as_posix()
+
+def quote_path(ref):
+    if os.name != 'nt': return shlex.quote(ref)
+    return '"' + ref + '"' if ' ' in ref else ref
+
+def graph_cmd():
+    return launcher() + ' ' + quote_path(script_ref())
+
+def preflight_done(d):
+    return bool(d.get('skip_preflight')) or any(e.get('cmd') == 'preflight' and e.get('outcome') == 'ok' for e in read_log(d['id']))
+
+# ---- file auto-record: git snapshot at start, diff at end ----
+def _git(args, top=None):
+    try: r = subprocess.run(['git', *args], text=True, capture_output=True, encoding='utf-8', errors='replace', cwd=top, timeout=20)
+    except (OSError, subprocess.SubprocessError): return None
+    return r.stdout if r.returncode == 0 else None
+
+def _dirty(top):
+    """{path: mtime_ns or None} for every changed or untracked file, paths relative to the repo root."""
+    out = _git(['status', '--porcelain', '-z', '-uall'], top)
+    if out is None: return None
+    items, res, i = out.split('\0'), {}, 0
+    while i < len(items):
+        e = items[i]; i += 1
+        if len(e) < 4: continue
+        if e[0] in 'RC': i += 1
+        path = e[3:]
+        if path.startswith('.graph/'): continue
+        try: res[path] = (Path(top) / path).stat().st_mtime_ns
+        except OSError: res[path] = None
+    return res
+
+def take_snapshot():
+    top = (_git(['rev-parse', '--show-toplevel']) or '').strip()
+    if not top: return None
+    dirty = _dirty(top)
+    if dirty is None: return None
+    return {'top': top, 'head': (_git(['rev-parse', 'HEAD'], top) or '').strip() or None, 'dirty': dirty}
+
+def changed_since(snap):
+    top = snap['top']; now_dirty = _dirty(top)
+    if now_dirty is None: return []
+    out = {p for p, m in now_dirty.items() if p not in snap['dirty'] or snap['dirty'][p] != m}
+    head = (_git(['rev-parse', 'HEAD'], top) or '').strip() or None
+    if snap.get('head') and head and head != snap['head']:
+        out |= {p for p in (_git(['diff', '--name-only', snap['head'], head], top) or '').splitlines() if p and not p.startswith('.graph/')}
+    return sorted(out)
+
+FILES_NOTE = 'Files were recorded from git changes between start and end of this node. Parallel nodes may share attributions.'
+
 # Allowed moves. A new node counts as pending. "retrying" is only reached from failed.
 MOVES = {'pending': ('pending', 'running', 'skipped'), 'running': ('running', 'complete', 'failed'),
          'retrying': ('retrying', 'complete', 'failed'), 'failed': ('failed', 'retrying'),
@@ -134,6 +198,9 @@ def guard(a, d, n):
     if a.status == 'cached': die(3, f"Refused: {a.node} cannot be marked cached, nothing records a cache hit. Run it, or skip it with --reason.")
     if a.status not in MOVES[prev]:
         die(3, f"Refused: {a.node} cannot go from {prev} to {a.status}. Allowed next: {', '.join(MOVES[prev]) or 'none'}.")
+    if a.status in ('running', 'retrying') and not preflight_done(d):
+        die(3, f"Refused: preflight has not run for {d['id']}. Run: {graph_cmd()} preflight --run {d['id']} --needs <comma list>  "
+               f"(or create the run with init --skip-preflight \"<reason>\" if the user declined it). Then start the node again.")
     if a.status == 'skipped' and not (a.reason or (n or {}).get('skip_reason')):
         die(3, f"Refused: skipping {a.node} needs a reason. Add --reason \"<why>\".")
     old_deps = (n or {}).get('depends_on', [])
@@ -179,12 +246,13 @@ def apply_node(a, result):
     previous = None if created else n.get('status')
     if created: d['nodes'].append(n)
     n.update({k: v for k, v in {'role': a.role, 'status': a.status, 'model': a.model, 'check': a.check,
-                                'target': a.target, 'risk': a.risk, 'goal': a.goal, 'skip_reason': a.reason}.items() if v is not None})
+                                'target': a.target, 'risk': a.risk, 'goal': (a.goal or '').strip() or None, 'skip_reason': a.reason}.items() if v is not None})
     n['depends_on'] = deps
     if a.files: n['files'] = sorted(set(n.get('files', []) + a.files))
     if a.status in ('running', 'retrying') and previous not in ('running', 'retrying'):
         n['attempts'] = n.get('attempts', 0) + 1
         n['started_epoch'] = epoch(); n['started_at'] = now()
+        n['snapshot'] = take_snapshot()
         if d.get('status') == 'planning': d['status'] = 'running'
     refused = None
     if result:
@@ -193,8 +261,15 @@ def apply_node(a, result):
             n['status'] = 'failed'
             refused = (f"Refused: check failed for {a.node} (exit {result['check_exit']}), node set to failed. "
                        f"Run \"brief {a.run} {a.node}\" and hand it to a fresh subagent to retry.")
+    if n['status'] in ('complete', 'failed') and 'snapshot' in n:
+        snap = n.pop('snapshot')
+        if snap:
+            auto = changed_since(snap)
+            if auto: n['files'] = sorted(set(n.get('files', []) + auto))
+            n['files_note'] = FILES_NOTE
     if n['status'] in ('complete', 'failed', 'skipped', 'cached'):
         n['ended_epoch'] = epoch(); n['ended_at'] = now()
+        if n.get('started_epoch'): n.setdefault('spans', []).append([n['started_epoch'], n['ended_epoch']])
         if n.get('started_epoch'): n['duration_ms'] = round((n['ended_epoch'] - n['started_epoch']) * 1000)
     n['updated_at'] = now(); d['updated_at'] = now(); save(p, d); render_files(p, d)
     print(ascii_graph(d))
@@ -285,6 +360,26 @@ def mermaid(d):
         for dep in n.get('depends_on',[]): lines.append(f'  {safe_id(dep)} --> {safe_id(n["id"])}')
     return '\n'.join(lines)+'\n'
 
+def parallel_info(d):
+    """(levels with 2+ nodes, whether any two nodes overlapped in time). Overlap comes from recorded start and end times only."""
+    levels=node_levels(d); per={}
+    for n in d.get('nodes',[]): per[levels[n['id']]]=per.get(levels[n['id']],0)+1
+    wide=sum(1 for c in per.values() if c>=2)
+    span=[]  # (node index, start, end): every attempt counts, so a retry does not hide an overlap
+    for k,n in enumerate(d.get('nodes',[])):
+        done=[tuple(x) for x in n.get('spans',[])]
+        if n.get('status') in ('running','retrying') and n.get('started_epoch'): done.append((n['started_epoch'],epoch()))
+        elif not done and n.get('started_epoch'): done.append((n['started_epoch'],n.get('ended_epoch') or epoch()))
+        span+=[(k,a,b) for a,b in done]
+    over=any(x[0]!=y[0] and x[1]<y[2] and y[1]<x[2] for i,x in enumerate(span) for y in span[i+1:])
+    return wide,over
+
+def parallel_line(d):
+    wide,over=parallel_info(d)
+    if not wide: return 'Parallel: no plan level had 2 or more nodes, so nothing could run in parallel.'
+    word='level' if wide==1 else 'levels'
+    return f"Parallel: {wide} {word} had 2+ nodes; nodes overlapped in time: {'yes' if over else 'no'}."+('' if over else ' They ran one after another.')
+
 def stats(d):
     nodes=d.get('nodes',[]); statuses={}
     for n in nodes: statuses[n.get('status','unknown')]=statuses.get(n.get('status','unknown'),0)+1
@@ -342,10 +437,52 @@ def summary_text(d):
         lines+= [f"  {'✔' if q.get('status') in ('passed','no-tests') else '✖'} {q.get('command','')} · {q.get('duration_ms',0)}ms" for q in checks]
     files=sorted({f for n in d.get('nodes',[]) for f in n.get('files',[])})
     if files: lines.append(f"Files ({len(files)}): "+', '.join(files))
+    lines.append(parallel_line(d))
     lines.append(f"Stats: retries {s['retries']} · wall {s['wall_ms']/1000:.1f}s · compute {s['duration_ms']/1000:.1f}s")
     lines.append(f"Report: {ROOT/d['id']/'graph.html'}")
     lines.append(rule)
     return '\n'.join(lines)
+
+def short(text,n=110):
+    text=' '.join(str(text or '').split())
+    return text if len(text)<=n else text[:n-3]+'...'
+
+def failure_history(d):
+    """Lines for every failed check and refused action in the full log, each with how it was resolved."""
+    log=read_log(d['id']) if d.get('id') else []; out=[]
+    checks={}  # node -> list of exit codes, in order
+    for i,e in enumerate(log):
+        if e.get('cmd')=='node' and e.get('node') and e.get('checks'):
+            c=e['checks'][0]; ok=c.get('exit_code')==0 and not c.get('timed_out')
+            checks.setdefault(e['node'],[]).append((ok,c.get('exit_code'),c.get('timed_out')))
+    done_nodes={}
+    for node,runs in checks.items():
+        bad=[r for r in runs if not r[0]]
+        if not bad: continue
+        codes=', '.join('timeout' if r[2] else f'exit {r[1]}' for r in bad)
+        first_ok=next((k for k,r in enumerate(runs,1) if r[0]),None)
+        n_bad=len(bad); times='once' if n_bad==1 else f'{n_bad} times'
+        end=f'passed on attempt {first_ok}.' if first_ok else 'did not pass. The node is still failed.'
+        out.append(f"- Node {node}: check failed {times} ({codes}), {end}")
+    for i,e in enumerate(log):
+        if e.get('outcome')!='refused': continue
+        if e.get('cmd')=='node' and e.get('checks') and (e['checks'][0].get('exit_code')!=0 or e['checks'][0].get('timed_out')): continue
+        later=[x for x in log[i+1:] if x.get('outcome')=='ok' and x.get('cmd')==e.get('cmd') and x.get('node')==e.get('node')
+               and ((x.get('args') or {}).get('status')==(e.get('args') or {}).get('status'))]
+        if e.get('cmd')=='finish' and not later and d.get('finished_at') and d.get('status') in ('complete','complete-unverified'): later=[e]
+        who=f"Node {e['node']}" if e.get('node') else e.get('cmd','action').capitalize()
+        what=f"{e.get('cmd')} refused" if e.get('cmd')!='node' else f"move to {(e.get('args') or {}).get('status','?')} refused"
+        out.append(f"- {who}: {what} ({short(e.get('message'))}) "+('Resolved: the same action succeeded later.' if later else 'Not resolved in the log.'))
+    byq={}
+    for x in d.get('quality',[]): byq.setdefault(x['command'],[]).append(x.get('status'))
+    for cmd,sts in byq.items():
+        nb=sum(1 for t in sts if t in ('failed','timeout'))
+        if not nb: continue
+        ok=next((k for k,t in enumerate(sts,1) if t in ('passed','no-tests')),None)
+        later_ok=sts[-1] in ('passed','no-tests')
+        times='once' if nb==1 else f'{nb} times'
+        out.append(f"- Quality check `{cmd}`: failed {times}, "+(f'passed on a later run (run {max(k for k,t in enumerate(sts,1) if t in ("passed","no-tests"))}).' if later_ok else 'latest run did not pass.'))
+    return out
 
 def build_summary(d):
     """Plain-language run summary built only from state. Short sentences, no claim the state does not show."""
@@ -384,17 +521,25 @@ def build_summary(d):
     for x in q:
         checks+=1; L.append(f"- Quality check `{x.get('command','')}`: {x.get('status','unknown')}.")
     if not checks and not any(l.startswith('- Node') for l in L[L.index('## What was checked'):]): L.append('- No check ran.')
+    L+=['','## How it ran','',parallel_line(d)]
     L+=['','## What failed','']
-    out=[f"- Node {n['id']} failed after {n.get('attempts',0)} attempt(s)." + (f" Check exit was {n['check_exit']}." if n.get('check_exit') not in (None,0) else '') for n in failed]
-    out+=[f"- Quality check `{x.get('command','')}` {x.get('status')}." for x in badq]
-    L+=out or ['- Nothing failed.']
+    out=failure_history(d)
+    out+=[f"- Node {n['id']} is failed now, after {n.get('attempts',0)} attempt(s)." + (f" Check exit was {n['check_exit']}." if n.get('check_exit') not in (None,0) else '') for n in failed
+          if not any(l.startswith(f"- Node {n['id']}: check failed") for l in out)]
+    out+=[f"- Quality check `{x.get('command','')}` {x.get('status')} in its latest run." for x in badq]
+    L+=out or ['- Nothing failed. The log shows no failed check and no refused action.']
     L+=['','## What you must do next','']
     todo=[f"- Fix node {n['id']}. Run the brief command for it and retry with a fresh agent." for n in failed]
     todo+=[f"- Fix the failing check `{x.get('command','')}`, then run quality again." for x in badq]
     todo+=[f"- Finish node {n['id']}. It is {n.get('status')}." for n in open_]
     if status=='complete-unverified': todo.append('- Test the result yourself. No check proved it.')
     todo+=[f"- {g}" for g in d.get('access_gaps',[])]
-    L+=todo or ['- Nothing. All nodes are done and checked.']
+    passed=[n['id'] for n in nodes if n.get('status')=='complete' and n.get('check_exit')==0]
+    unchecked=[n['id'] for n in nodes if n.get('status') in ('complete','cached') and n.get('check_exit')!=0]
+    if skipped: todo.append(f"- Skipped or cached, not run: {', '.join(skipped)}. Confirm that is fine.")
+    if unchecked: todo.append(f"- Nothing is required by the runtime, but these nodes had no passing check, so nothing proves them: {', '.join(unchecked)}. Look at them yourself."+(f" Checked and passed: {', '.join(passed)}." if passed else ''))
+    elif status=='complete' and nodes and not todo: todo.append('- Nothing. Every node check ran and passed.')
+    L+=todo or ['- Nothing to do.']
     return '\n'.join(L)+'\n'
 
 def verify_plans(d):
@@ -532,12 +677,15 @@ def cmd_quality(a):
     if failed: CTX['msg']='A quality check failed or timed out.'; raise SystemExit(1)
 
 def cmd_validate(a):
+    # exit 1: bad plan structure. exit 3: a node has no goal (refused by a rule).
     _,d=load(a.run); nodes=d.get('nodes',[]); ids={n['id'] for n in nodes}; problems=[]
     for n in nodes:
         for dep in n.get('depends_on',[]):
             if dep==n['id']: problems.append(f"self-dependency: {n['id']}")
             elif dep not in ids: problems.append(f"unknown dependency: {n['id']} ← {dep}")
     for n in nodes: problems += field_problems(n)
+    nogoal=[n['id'] for n in nodes if not (n.get('goal') or '').strip()]
+    if nogoal: problems.append('missing goal on node(s): '+', '.join(nogoal)+'. Set one with: node <run> <id> --role <role> --status pending --goal "<what this node must achieve>"')
     graph={n['id']:[dep for dep in n.get('depends_on',[]) if dep in ids and dep!=n['id']] for n in nodes}
     done=set()
     def visit(nid,path):
@@ -548,7 +696,7 @@ def cmd_validate(a):
         done.add(nid)
     for nid in graph: visit(nid,[])
     if problems:
-        CTX['msg']='; '.join(problems)[:500]; print('\n'.join(f'✖ {x}' for x in problems)); raise SystemExit(1)
+        CTX['msg']='; '.join(problems)[:500]; print('\n'.join(f'✖ {x}' for x in problems)); raise SystemExit(3 if nogoal else 1)
     print(f'✔ plan valid: {len(nodes)} nodes, all dependencies known, no cycles')
 
 def js(x): return json.dumps(x, ensure_ascii=True)
@@ -556,16 +704,17 @@ def js(x): return json.dumps(x, ensure_ascii=True)
 def cmd_export_workflow(a):
     _, d = load(a.run); nodes = d.get('nodes', [])
     if not nodes: die(2, f'Run {a.run} has no nodes. Add the plan first, then export.')
+    buf = io.StringIO()
     try:
-        with contextlib.redirect_stdout(sys.stderr): cmd_validate(argparse.Namespace(run=a.run))
+        with contextlib.redirect_stdout(buf): cmd_validate(argparse.Namespace(run=a.run))
     except SystemExit:
-        die(3, f'Refused: plan for {a.run} is not valid. Fix it until "validate {a.run}" passes, then export.')
+        die(3, f'Refused: plan for {a.run} is not valid. Fix it until "validate {a.run}" passes, then export.\n' + buf.getvalue().rstrip())
     levels = node_levels(d); by = {}
     for n in nodes: by.setdefault(levels[n['id']], []).append(n)
-    g = f'"{Path(sys.executable or "python3").as_posix()}" "{Path(__file__).resolve().as_posix()}"'
+    g = graph_cmd()
     def mark(n, status): return f"{g} node {shlex.quote(a.run)} {shlex.quote(n['id'])} --role {shlex.quote(n.get('role') or 'worker')} --status {status}"
     def prompt(n):
-        lines = [f"You are one node of a graph run. Node: {n['id']}. Goal: {n.get('goal') or n.get('role') or n['id']}."]
+        lines = [f"You are one node of a graph run. Node: {n['id']}. Goal: {n['goal']}."]
         if n.get('files'): lines.append('Files: ' + ', '.join(n['files']) + '.')
         lines += ['1. Before work, run: ' + mark(n, 'running'), '2. Do the work.']
         if n.get('check'): lines.append(f"3. Check (the runtime runs it for you on complete): {n['check']}")
@@ -576,11 +725,15 @@ def cmd_export_workflow(a):
         return '\n'.join(lines)
     title = lambda i: f'Level {i + 1}'
     phases = ',\n'.join(f'    {{ title: {js(title(i))}, detail: {js(", ".join(n["id"] for n in by[k]))} }}' for i, k in enumerate(sorted(by)))
-    out = ['export const meta = {', f'  name: {js("graph-" + a.run)},',
+    out = [f'// Graph run {a.run}: this script belongs to that run only. For a new task, create a new run and export again.',
+           '// Paths are relative to the project root: run the Workflow tool from there.',
+           'export const meta = {', f'  name: {js("graph-" + a.run)},',
            f'  description: {js("Graph run " + a.run + ": " + str(d.get("task", ""))[:120])},',
            '  phases: [', phases, '  ],', '}', '',
            "const schema = { type: 'object', required: ['ok', 'summary'], properties: { ok: { type: 'boolean' }, summary: { type: 'string' } } }",
            'let stopped = false', '']
+    if not preflight_done(d):
+        out += [f"await agent({js('Run: ' + g + ' preflight --run ' + shlex.quote(a.run) + ' --needs <what this task needs, for example github,deploy>. Read the summary it prints. Reply ok true when it ran.')}, {{ label: 'preflight', schema }})", '']
     for i in sorted(by):
         out += [f'if (!stopped) {{', f'  phase({js(title(i))})', '  const results = await parallel([']
         out += [f"    () => agent({js(prompt(n))}, {{ label: {js(n['id'])}, schema }})," for n in by[i]]
@@ -664,7 +817,7 @@ def cmd_preflight(a):
     except Exception as e: print(f'preflight scan incomplete ({type(e).__name__}). Continue without it or retry with --refresh.')
 
 # ---- run log: .graph/runs/<id>/log.jsonl, append-only, one JSON line per command call ----
-LOG_ARGS = ('status', 'depends_on', 'check', 'target', 'risk', 'reason', 'command', 'type', 'needs', 'refresh',
+LOG_ARGS = ('skip_preflight', 'goal', 'status', 'depends_on', 'check', 'target', 'risk', 'reason', 'command', 'type', 'needs', 'refresh',
             'with_accounts', 'include_dependents')
 
 def log_path(run_id): return ROOT / run_id / 'log.jsonl'
@@ -734,7 +887,7 @@ def cmd_log(a):
 
 def main():
     ap=argparse.ArgumentParser();sp=ap.add_subparsers(required=True)
-    x=sp.add_parser('init');x.add_argument('task');x.add_argument('--id');x.add_argument('--host');x.add_argument('--max-retries',type=int,default=2);x.add_argument('--quality-command',action='append');x.set_defaults(fn=cmd_init)
+    x=sp.add_parser('init');x.add_argument('task');x.add_argument('--id');x.add_argument('--host');x.add_argument('--max-retries',type=int,default=2);x.add_argument('--quality-command',action='append');x.add_argument('--skip-preflight',metavar='REASON');x.set_defaults(fn=cmd_init)
     x=sp.add_parser('node');x.add_argument('run');x.add_argument('node');x.add_argument('--role',required=True);x.add_argument('--status',required=True);x.add_argument('--depends-on',nargs='*');x.add_argument('--model');x.add_argument('--files',nargs='*');x.add_argument('--check');x.add_argument('--target');x.add_argument('--risk');x.add_argument('--goal');x.add_argument('--reason');x.add_argument('--check-timeout',type=int,default=300);x.set_defaults(fn=cmd_node,nolock=True)
     x=sp.add_parser('brief');x.add_argument('run');x.add_argument('node');x.set_defaults(fn=cmd_brief,nolock=True)
     x=sp.add_parser('verify-plan');x.add_argument('run');x.add_argument('node');x.set_defaults(fn=cmd_verify_plan,nolock=True)

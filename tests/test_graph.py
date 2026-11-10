@@ -16,8 +16,10 @@ class GraphCase(unittest.TestCase):
         self.assertEqual(r.returncode, code, f'{args}: {r.stdout}{r.stderr}')
         return r
 
-    def init(self, *extra):
-        self.g('init', 'task', '--id', 'r1', *extra)
+    def init(self, *extra, preflight=False):
+        # Most tests are about other rules: skip the preflight gate. Gate tests pass preflight=True.
+        skip = [] if preflight else ['--skip-preflight', 'test']
+        self.g('init', 'task', '--id', 'r1', *skip, *extra)
 
     def node(self, nid, status, *extra, code=0):
         return self.g('node', 'r1', nid, '--role', 'worker', '--status', status, *extra, code=code)
@@ -292,7 +294,7 @@ class Checks(GraphCase):
 
     def test_validate_catches_bad_stored_field(self):
         self.init()
-        self.node('a', 'pending', '--target', 'web', '--risk', 'high')
+        self.node('a', 'pending', '--target', 'web', '--risk', 'high', '--goal', 'g')
         self.g('validate', 'r1')
         p = Path(self.dir) / '.graph/runs/r1/state.json'
         d = json.loads(p.read_text(encoding='utf-8')); d['nodes'][0]['target'] = 'x'
@@ -351,7 +353,7 @@ class Summary(GraphCase):
         self.g('finish', 'r1', '--status', 'failed')
         s = self.summary()
         self.assertIn('The run failed.', s)
-        self.assertIn('Node a failed', s); self.assertIn('exit was 3', s); self.assertIn('Fix node a', s)
+        self.assertIn('Node a: check failed once (exit 3)', s); self.assertIn('still failed', s); self.assertIn('Fix node a', s)
 
     def test_html_has_summary_and_evidence(self):
         self.init()
@@ -367,18 +369,20 @@ class ExportWorkflow(GraphCase):
     def test_export_checks_syntax_and_levels(self):
         import shutil
         self.init()
-        self.node('a', 'pending')
-        self.node('b', 'pending', '--depends-on', 'a', '--check', 'echo "hi"')
-        self.node('c', 'pending', '--depends-on', 'a')
+        self.node('a', 'pending', '--goal', 'do a')
+        self.node('b', 'pending', '--depends-on', 'a', '--check', 'echo "hi"', '--goal', 'do b')
+        self.node('c', 'pending', '--depends-on', 'a', '--goal', 'do c')
         out = Path(self.dir) / 'wf.mjs'
         self.g('export-workflow', 'r1', '--out', str(out))
         js = out.read_text(encoding='utf-8')
-        self.assertTrue(js.startswith('export const meta = {'))
+        self.assertIn('export const meta = {', js)
+        self.assertTrue(js.startswith('// Graph run r1'))
+        self.assertIn('Goal: do b.', js)
         self.assertEqual(js.count('label: "a"'), 1)
         self.assertEqual(js.count('parallel('), 2)
         self.assertIn('--status running', js)
         self.assertIn('{ title: "Level 1", detail: "a" }', js)
-        self.assertIn(Path(sys.executable).as_posix(), js)
+        self.assertNotIn(Path(sys.executable).as_posix(), js)
         self.assertNotIn('Date.now', js); self.assertNotIn('Math.random', js)
         self.assertLess(js.index('label: "a"'), js.index('label: "b"'))
         node = shutil.which('node')
@@ -389,9 +393,9 @@ class ExportWorkflow(GraphCase):
     def test_default_path_and_invalid_plan(self):
         self.init()
         self.g('export-workflow', 'r1', code=2)
-        self.node('a', 'pending', '--depends-on', 'b')
+        self.node('a', 'pending', '--depends-on', 'b', '--goal', 'ga')
         self.g('export-workflow', 'r1', code=3)
-        self.node('b', 'pending')
+        self.node('b', 'pending', '--goal', 'gb')
         self.g('export-workflow', 'r1')
         self.assertTrue((Path(self.dir) / '.claude/workflows/graph-r1.js').exists())
 
@@ -475,3 +479,146 @@ class RunLog(GraphCase):
         e = self.log()[-1]
         self.assertEqual(e['cmd'], 'preflight')
         self.assertIn('github', e['preflight']['needs'])
+
+
+GIT_ENV = {'GIT_AUTHOR_NAME': 't', 'GIT_AUTHOR_EMAIL': 't@t', 'GIT_COMMITTER_NAME': 't', 'GIT_COMMITTER_EMAIL': 't@t'}
+
+
+def have_git():
+    import shutil
+    return shutil.which('git') is not None
+
+
+class Fixes(GraphCase):
+    def git(self, *args):
+        subprocess.run(['git', *args], cwd=self.dir, check=True, capture_output=True, env={**os.environ, **GIT_ENV})
+
+    def write(self, name, text='x'):
+        p = Path(self.dir) / name; p.parent.mkdir(parents=True, exist_ok=True); p.write_text(text, encoding='utf-8')
+
+    def summary(self):
+        return (Path(self.dir) / '.graph/runs/r1/summary.md').read_text(encoding='utf-8')
+
+    # 1. summary history
+    def test_summary_lists_failed_check_and_refusals_with_resolution(self):
+        self.init()
+        flag = Path(self.dir) / 'flag'
+        chk = f'"{sys.executable}" -c "import os,sys; sys.exit(0 if os.path.exists(r\'{flag}\') else 1)"'
+        self.node('t', 'pending', '--goal', 'tests', '--check', chk)
+        self.node('u', 'pending', '--goal', 'u')
+        self.node('t', 'running'); self.node('t', 'complete', code=3)      # check fails, refused
+        flag.write_text('1')
+        self.node('t', 'retrying'); self.node('t', 'complete')              # passes on attempt 2
+        self.node('u', 'running'); self.node('u', 'complete')
+        self.g('quality', 'r1', '--command', 'true')
+        self.g('finish', 'r1')
+        s = self.summary()
+        self.assertNotIn('Nothing failed', s)
+        self.assertIn('Node t: check failed once (exit 1), passed on attempt 2.', s)
+        self.assertNotIn('Nothing. All nodes are done and checked', s)
+        self.assertIn('no passing check', s); self.assertIn('u', s.split('no passing check')[1].split('.')[0])
+        self.assertIn('Checked and passed: t', s)
+
+    def test_summary_lists_refused_finish(self):
+        self.init()
+        self.node('a', 'pending', '--goal', 'g'); self.node('a', 'running')
+        self.g('finish', 'r1', code=3)
+        self.node('a', 'complete'); self.g('finish', 'r1')
+        s = self.summary()
+        self.assertIn('Finish: finish refused', s); self.assertIn('Resolved', s)
+
+    def test_all_checked_says_so(self):
+        self.init('--quality-command', f'"{sys.executable}" -c "pass"')
+        self.node('a', 'pending', '--goal', 'g', '--check', 'true'); self.ran('a')
+        self.g('quality', 'r1'); self.g('finish', 'r1')
+        self.assertIn('Every node check ran and passed', self.summary())
+
+    # 2. files
+    @unittest.skipUnless(have_git(), 'git missing')
+    def test_files_recorded_from_git(self):
+        self.git('init', '-q'); self.write('old.txt', 'a'); self.write('keep.txt', 'k')
+        self.git('add', '.'); self.git('commit', '-qm', 'i')
+        self.write('dirty_before.txt', 'd')
+        self.init()
+        self.node('a', 'pending', '--goal', 'g')
+        self.node('a', 'running')
+        self.write('old.txt', 'changed'); self.write('src/new.py', 'n')
+        self.node('a', 'complete', '--files', 'extra.md')
+        n = self.state()['nodes'][0]
+        self.assertEqual(sorted(n['files']), ['extra.md', 'old.txt', 'src/new.py'])
+        self.assertIn('Parallel nodes may share', n['files_note']); self.assertNotIn('snapshot', n)
+        self.node('b', 'pending', '--goal', 'g'); self.node('b', 'running')
+        self.git('add', '.'); self.git('commit', '-qm', 'two')
+        self.node('b', 'complete')
+        self.assertIn('old.txt', self.state()['nodes'][1]['files'])
+
+    def test_no_git_is_silent(self):
+        self.init(); self.node('a', 'pending', '--goal', 'g'); self.ran('a')
+        n = self.state()['nodes'][0]
+        self.assertEqual(n['files'], []); self.assertNotIn('files_note', n)
+
+    # 3. preflight gate
+    def test_preflight_gate(self):
+        self.init(preflight=True)
+        self.node('a', 'pending', '--goal', 'g')
+        r = self.node('a', 'running', code=3)
+        self.assertIn('preflight --run r1', r.stderr); self.assertIn('--skip-preflight', r.stderr)
+        self.g('preflight', '--run', 'r1', '--needs', 'github')
+        self.node('a', 'running'); self.node('a', 'complete')
+
+    def test_skip_preflight_logged(self):
+        self.g('init', 't', '--id', 'r1', '--skip-preflight', 'user said no')
+        self.assertEqual(self.state()['skip_preflight'], 'user said no')
+        log = (Path(self.dir) / '.graph/runs/r1/log.jsonl').read_text(encoding='utf-8')
+        self.assertIn('user said no', log)
+        self.node('a', 'running')
+        self.g('init', 't', '--id', 'r2', '--skip-preflight', ' ', code=2)
+
+    # 4. goal
+    def test_missing_goal_refused(self):
+        self.init(); self.node('a', 'pending'); self.node('b', 'pending', '--goal', 'ok')
+        r = self.g('validate', 'r1', code=3); self.assertIn('a', r.stdout)
+        r = self.g('export-workflow', 'r1', code=3); self.assertIn('missing goal', r.stderr)
+        self.node('a', 'pending', '--goal', 'now set')
+        self.g('validate', 'r1')
+
+    # 5. export path
+    def test_export_relative_when_installed_in_project(self):
+        import shutil
+        skill = Path(self.dir) / '.claude/skills/graph'
+        shutil.copytree(Path(GRAPH).parent.parent, skill, ignore=shutil.ignore_patterns('__pycache__'))
+        run = lambda *a: subprocess.run([sys.executable, str(skill / 'scripts/graph.py'), *a], cwd=self.dir, capture_output=True, text=True)
+        self.assertEqual(run('init', 't', '--id', 'r1', '--skip-preflight', 'x').returncode, 0)
+        self.assertEqual(run('node', 'r1', 'a', '--role', 'w', '--status', 'pending', '--goal', 'g').returncode, 0)
+        self.assertEqual(run('export-workflow', 'r1').returncode, 0)
+        js = (Path(self.dir) / '.claude/workflows/graph-r1.js').read_text(encoding='utf-8')
+        self.assertIn('.claude/skills/graph/scripts/graph.py node r1 a', js)
+        self.assertNotIn(self.dir, js)
+        self.assertIn('Graph run r1', js.splitlines()[0])
+        launcher = 'python3' if os.name != 'nt' else 'py -3'
+        if os.name != 'nt' and shutil.which('python3'): self.assertIn('python3 .claude/skills', js)
+
+    def test_export_adds_preflight_step_when_not_done(self):
+        self.init(preflight=True); self.node('a', 'pending', '--goal', 'g')
+        self.g('export-workflow', 'r1', '--out', str(Path(self.dir) / 'w.js'))
+        self.assertIn("label: 'preflight'", (Path(self.dir) / 'w.js').read_text(encoding='utf-8'))
+
+    # 6b. parallel honesty
+    def test_parallel_line_no_overlap(self):
+        self.init()
+        self.node('a', 'pending', '--goal', 'g'); self.node('b', 'pending', '--goal', 'g')
+        self.ran('a'); self.ran('b'); self.g('finish', 'r1')
+        self.assertIn('Parallel: 1 level had 2+ nodes; nodes overlapped in time: no.', self.summary())
+        self.assertIn('Parallel: 1 level had 2+ nodes', self.g('summary', 'r1').stdout)
+
+    def test_parallel_line_overlap_and_none(self):
+        self.init()
+        self.node('a', 'pending', '--goal', 'g'); self.node('b', 'pending', '--goal', 'g')
+        self.node('a', 'running'); self.node('b', 'running'); self.node('a', 'complete'); self.node('b', 'complete')
+        self.g('finish', 'r1')
+        self.assertIn('nodes overlapped in time: yes', self.summary())
+        self.g('init', 't', '--id', 'r3', '--skip-preflight', 'x')
+        self.g('node', 'r3', 'a', '--role', 'w', '--status', 'pending')
+        self.g('finish', 'r3', '--status', 'failed')
+        s = (Path(self.dir) / '.graph/runs/r3/summary.md').read_text(encoding='utf-8')
+        self.assertIn('no plan level had 2 or more nodes', s)

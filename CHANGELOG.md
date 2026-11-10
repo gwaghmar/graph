@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed (found in a real end-to-end test)
+- summary.md "What failed" is built from the full run log, with resolutions. "Checked" is claimed only for nodes whose check ran and passed.
+- Files are recorded by the runtime from git snapshots (node start vs end). `--files` stays as an extra.
+- Preflight is enforced: first node start is refused until `preflight --run <id>` is logged, or `init --skip-preflight "<reason>"`.
+- `validate` and `export-workflow` refuse nodes without a goal (exit 3).
+- Exported workflow uses a project-relative script path and a `python3` / `py -3` launcher, and states which run it belongs to.
+- Summary and report state honestly whether nodes overlapped in time. SKILL.md requires Workflow or subagents when a level has 2+ nodes on Claude Code.
+
 ## [1.0.0] - 2026-11-10
 
 Graph is now a plan gate and run recorder. The rules are enforced in code.

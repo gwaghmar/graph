@@ -47,6 +47,7 @@ It copies one skill folder to `.claude/skills/graph` and `.agents/skills/graph`.
 G() { python3 .agents/skills/graph/scripts/graph.py "$@"; }
 G preflight --needs github,deploy
 G init "Add CSV export" --host claude --id r1
+G preflight --run r1 --needs github,deploy   # required before any node starts (or init --skip-preflight "<reason>")
 G node r1 scaffold --role worker --status pending
 G node r1 api --role worker --status pending --depends-on scaffold \
    --check "npm test"
@@ -69,9 +70,9 @@ In normal use the agent runs these for you. Type `/graph <task>` on Claude Code,
 
 | Command | What it does |
 |---|---|
-| `preflight --needs a,b [--refresh] [--with-accounts] [--json] [--run id]` | Scan the environment, pick tools (`--run` logs it) |
+| `preflight --needs a,b [--refresh] [--with-accounts] [--json] [--run id]` | Scan the environment, pick tools (`--run` logs it; nodes cannot start until it is logged) |
 | `log <run> [--refusals] [--node X] [--json]` | Show what the run did and what the rules refused |
-| `init "<task>" [--host H] [--max-retries N]` | Start a run |
+| `init "<task>" [--host H] [--max-retries N] [--skip-preflight R]` | Start a run |
 | `node <run> <id> --role R --status S [...]` | Add or update a node, with rule checks |
 | `validate <run>` | Reject bad dependencies |
 | `next <run>` | List ready nodes |
@@ -113,3 +114,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Run `npm test`.
 ## License
 
 [MIT](LICENSE)
+
+## What the runtime records itself
+- Files: a git snapshot at node start and a diff at node end fill each node's files (parallel nodes may share attributions; no git, nothing recorded).
+- Preflight: the first node start is refused until `preflight --run <id>` is logged, or the run used `--skip-preflight`.
+- Goals: every node needs `--goal`. `validate` and `export-workflow` refuse the plan otherwise.
+- Summary: "What failed" lists every failed check and refusal from the log with how it was resolved. A "Parallel:" line says whether nodes truly overlapped in time.
+- Exported workflow scripts use a project-relative script path when the skill is installed in the project.
