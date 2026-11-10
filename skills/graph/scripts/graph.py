@@ -75,8 +75,50 @@ def cmd_init(a):
 def unmet(d, n):
     return [dep for dep in n.get('depends_on', []) if (get_node(d, dep) or {}).get('status') not in DONE]
 
+TARGETS = ('web', 'phone', 'desktop', 'api', 'data', 'none')
+RISKS = ('low', 'high')
+
+def field_problems(n):
+    """Problems with the optional check, target and risk fields of one node."""
+    out = []
+    if n.get('check') is not None and not (isinstance(n['check'], str) and n['check'].strip()):
+        out.append(f"{n['id']}: check must be a non-empty command string")
+    if n.get('target') is not None and n['target'] not in TARGETS:
+        out.append(f"{n['id']}: target must be one of {', '.join(TARGETS)}")
+    if n.get('risk') is not None and n['risk'] not in RISKS:
+        out.append(f"{n['id']}: risk must be one of {', '.join(RISKS)}")
+    return out
+
+def tail_lines(text, n=40):
+    return '\n'.join((text or '').splitlines()[-n:])
+
+def run_check(command, timeout):
+    """Run a plan check command. shell=True is used ONLY here: the command is a user or plan command
+    (it may contain pipes or &&), never built from untrusted input by this script."""
+    started = epoch()
+    try:
+        r = subprocess.run(command, shell=True, text=True, encoding='utf-8', errors='replace',
+                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
+        code, out = r.returncode, r.stdout
+    except subprocess.TimeoutExpired as e:
+        out = e.stdout if isinstance(e.stdout, str) else (e.stdout or b'').decode('utf-8', 'replace')
+        code, out = None, (out or '') + f'\n[check timed out after {timeout}s]'
+    return {'check_exit': code, 'check_output': tail_lines(out), 'check_ms': round((epoch() - started) * 1000)}
+
 def cmd_node(a):
     if a.status not in STATUSES: die(2, f"Invalid status '{a.status}'. Use one of: {', '.join(STATUSES)}.")
+    if a.check_timeout < 1: die(2, '--check-timeout must be 1 or more.')
+    new = {'id': a.node, 'check': a.check, 'target': a.target, 'risk': a.risk}
+    bad = field_problems(new)
+    if bad: die(2, f"Bad plan field: {bad[0]}.")
+    _, d0 = load(a.run)
+    n0 = get_node(d0, a.node)
+    cmd = a.check if a.check is not None else (n0 or {}).get('check')
+    result = run_check(cmd, a.check_timeout) if a.status == 'complete' and cmd else None
+    with run_lock(a.run):
+        apply_node(a, result)
+
+def apply_node(a, result):
     p, d = load(a.run)
     n = get_node(d, a.node)
     created = n is None
@@ -94,18 +136,94 @@ def cmd_node(a):
             if n.get('attempts', 0) >= limit:
                 die(3, f"Refused: {a.node} used all {limit} attempts (max retries {limit - 1}). Mark it failed and stop, or ask the user.")
     if created: d['nodes'].append(n)
-    n.update({k: v for k, v in {'role': a.role, 'status': a.status, 'model': a.model}.items() if v is not None})
+    n.update({k: v for k, v in {'role': a.role, 'status': a.status, 'model': a.model, 'check': a.check,
+                                'target': a.target, 'risk': a.risk, 'goal': a.goal}.items() if v is not None})
     n['depends_on'] = deps
     if a.files: n['files'] = sorted(set(n.get('files', []) + a.files))
     if a.status in ('running', 'retrying') and previous not in ('running', 'retrying'):
         n['attempts'] = n.get('attempts', 0) + 1
         n['started_epoch'] = epoch(); n['started_at'] = now()
         if d.get('status') == 'planning': d['status'] = 'running'
-    if a.status in ('complete', 'failed', 'skipped', 'cached'):
+    refused = None
+    if result:
+        n.update(result)
+        if result['check_exit'] != 0:
+            n['status'] = 'failed'
+            refused = (f"Refused: check failed for {a.node} (exit {result['check_exit']}), node set to failed. "
+                       f"Run \"brief {a.run} {a.node}\" and hand it to a fresh subagent to retry.")
+    if n['status'] in ('complete', 'failed', 'skipped', 'cached'):
         n['ended_epoch'] = epoch(); n['ended_at'] = now()
         if n.get('started_epoch'): n['duration_ms'] = round((n['ended_epoch'] - n['started_epoch']) * 1000)
     n['updated_at'] = now(); d['updated_at'] = now(); save(p, d); render_files(p, d)
     print(ascii_graph(d))
+    if refused: die(3, refused)
+
+def cmd_brief(a):
+    _, d = load(a.run)
+    n = get_node(d, a.node) or die(2, f'Unknown node: {a.node}. Check the node id.')
+    limit = d.get('max_retries', 2) + 1
+    out = [f"RETRY BRIEF for node {n['id']} (attempt {n.get('attempts', 0) + 1} of {limit})",
+           f"Goal: {n.get('goal') or n.get('role', '')}", f"Task: {d['task']}",
+           f"Check: {n.get('check') or 'none'}"]
+    if n.get('check_output'):
+        out += [f"Last check exit code: {n.get('check_exit')}", 'Failing output (tail):', n['check_output']]
+    else: out.append('No failing output recorded.')
+    if n.get('files'): out.append('Files recorded for this node: ' + ', '.join(n['files']))
+    if shutil.which('git'):
+        try:
+            r = subprocess.run(['git', 'diff', '--stat'], text=True, capture_output=True, encoding='utf-8', errors='replace', timeout=10)
+            if r.returncode == 0 and r.stdout.strip(): out += ['Files changed (git diff --stat):', r.stdout.rstrip()]
+        except (OSError, subprocess.SubprocessError): pass
+    out.append('Start fresh: read the files, fix the cause of the failure, make the check pass. Do not rely on earlier context.')
+    print('\n'.join(out))
+
+def verify_steps(n, r):
+    """Ordered (name, state, note) steps for the node target. state is ok or no. Stops after the first missing step."""
+    t, v, os_ = n.get('target') or 'none', r.get('verify', {}), r.get('os')
+    mcp = [m.lower() for m in r.get('mcp', [])]
+    def has(*hints): return any(h in m for m in mcp for h in hints)
+    def yn(ok, work): return ('ok', '') if ok else ('no', work)
+    chrome = has('chrome', 'browser', 'playwright', 'puppeteer')
+    shot = os_ in ('mac', 'windows') or any(shutil.which(x) for x in ('scrot', 'import', 'gnome-screenshot', 'grim'))
+    mobile = ('iOS Simulator', *yn(os_ == 'mac' and v.get('ios_simulator') == 'yes', 'install Xcode, or use browser device emulation only')) \
+        if os_ == 'mac' else ('Android emulator', *yn(v.get('android_emulator') == 'yes', 'install Android Studio and create an AVD, or ask the user to test on a phone'))
+    plans = {
+        'web': [('build, tests, http status', 'ok', ''),
+                ('headless browser screenshot', *yn(v.get('headless_browser') == 'yes', 'install Chrome or Edge, or ask the user for a screenshot')),
+                ('real browser', *yn(chrome, 'add a browser MCP server, or ask the user to open the page'))],
+        'phone': [('browser device emulation', *yn(v.get('headless_browser') == 'yes' or chrome, 'install Chrome or Edge')),
+                  mobile,
+                  ('iPhone Mirroring (needs user consent)', *yn(os_ == 'mac' and v.get('iphone_mirroring') == 'yes', 'ask the user to check on the real phone'))],
+        'desktop': [('tests and launch exit code', 'ok', ''),
+                    ('screenshot', *yn(shot, 'install a screenshot tool, or ask the user for one')),
+                    ('computer-use', *yn(has('computer'), 'add a computer-use MCP server, or ask the user to look'))],
+        'api': [('contract tests or curl', 'ok', ''), ('staging call (needs staging URL and user consent)', 'ok', '')],
+        'data': [('counts and schema diff', 'ok', ''), ('reconcile with source', 'ok', '')]}
+    out = []
+    for step in plans.get(t, []):
+        out.append(step)
+        if step[1] == 'no': break
+    if t == 'phone' and os_ not in ('mac',): out = [s for s in out if 'iPhone Mirroring' not in s[0]]
+    return out
+
+def cmd_verify_plan(a):
+    _, d = load(a.run)
+    n = get_node(d, a.node) or die(2, f'Unknown node: {a.node}. Check the node id.')
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    try:
+        import preflight
+        r = preflight.scan(Path.cwd(), Path.home(), os.environ)
+    except Exception as e:
+        die(2, f'preflight scan failed ({type(e).__name__}). Run "preflight --refresh" and try again.')
+    t, risk = n.get('target') or 'none', n.get('risk') or 'low'
+    if t == 'none': print(f"{a.node}: target none, no extra verification. Rely on the node check."); return
+    steps = verify_steps(n, r)
+    print(f"Verify {a.node}: target {t}, risk {risk}, cheapest first")
+    for i, (name, st, note) in enumerate(steps, 1):
+        print(f"  {i}. {name}" + ('' if st == 'ok' else f" [missing] workaround: {note}"))
+    if risk == 'high' and len(steps) > 1 and steps[1][1] == 'ok':
+        print(f"High risk: after step 1 passes, escalate one step to step 2 ({steps[1][0]}).")
+    elif risk == 'high': print('High risk: step 2 is not available here, use the workaround and report it.')
 
 def cmd_next(a):
     _, d = load(a.run); limit = d.get('max_retries', 2) + 1
@@ -261,6 +379,7 @@ def cmd_validate(a):
         for dep in n.get('depends_on',[]):
             if dep==n['id']: problems.append(f"self-dependency: {n['id']}")
             elif dep not in ids: problems.append(f"unknown dependency: {n['id']} ← {dep}")
+    for n in nodes: problems += field_problems(n)
     graph={n['id']:[dep for dep in n.get('depends_on',[]) if dep in ids and dep!=n['id']] for n in nodes}
     done=set()
     def visit(nid,path):
@@ -337,7 +456,9 @@ def cmd_preflight(a):
 def main():
     ap=argparse.ArgumentParser();sp=ap.add_subparsers(required=True)
     x=sp.add_parser('init');x.add_argument('task');x.add_argument('--id');x.add_argument('--host');x.add_argument('--max-retries',type=int,default=2);x.set_defaults(fn=cmd_init)
-    x=sp.add_parser('node');x.add_argument('run');x.add_argument('node');x.add_argument('--role',required=True);x.add_argument('--status',required=True);x.add_argument('--depends-on',nargs='*');x.add_argument('--model');x.add_argument('--files',nargs='*');x.set_defaults(fn=cmd_node)
+    x=sp.add_parser('node');x.add_argument('run');x.add_argument('node');x.add_argument('--role',required=True);x.add_argument('--status',required=True);x.add_argument('--depends-on',nargs='*');x.add_argument('--model');x.add_argument('--files',nargs='*');x.add_argument('--check');x.add_argument('--target');x.add_argument('--risk');x.add_argument('--goal');x.add_argument('--check-timeout',type=int,default=300);x.set_defaults(fn=cmd_node,nolock=True)
+    x=sp.add_parser('brief');x.add_argument('run');x.add_argument('node');x.set_defaults(fn=cmd_brief,nolock=True)
+    x=sp.add_parser('verify-plan');x.add_argument('run');x.add_argument('node');x.set_defaults(fn=cmd_verify_plan,nolock=True)
     x=sp.add_parser('next');x.add_argument('run');x.set_defaults(fn=cmd_next,nolock=True)
     x=sp.add_parser('event');x.add_argument('run');x.add_argument('type');x.add_argument('message');x.set_defaults(fn=cmd_event)
     x=sp.add_parser('quality');x.add_argument('run');x.add_argument('--command',action='append');x.add_argument('--timeout',type=int,default=300);x.set_defaults(fn=cmd_quality,nolock=True)

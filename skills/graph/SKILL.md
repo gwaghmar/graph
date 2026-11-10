@@ -28,6 +28,9 @@ Below, `G` means that command.
    - Run `G next <run>`. It lists nodes that are ready.
    - Start each ready node with `G node <run> <id> --role <role> --status running`. Start them in parallel when the host has subagents.
    - When work ends, mark the node `complete` or `failed` the same way.
+   - Give a node `--check "<command>"` to gate it. On `--status complete` the runtime runs the check itself. If it fails, the node becomes `failed` and the runtime refuses (exit 3).
+   - To retry a failed node, run `G brief <run> <node>` and hand its output to a NEW subagent. Do not retry in the old context.
+   - For a node with `--target web|phone|desktop|api|data` and `--risk low|high`, run `G verify-plan <run> <node>`. Do the steps it lists, cheapest first. For high risk, escalate one step after step 1 passes.
    - If the runtime refuses, read the line. Do what it says. Do not work around it.
 6. Run `G quality <run>`. Fix failures. Then run `G finish <run> --status complete`. If you cannot finish, use `--status failed`.
 

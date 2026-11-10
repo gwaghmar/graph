@@ -159,5 +159,67 @@ class Rules(GraphCase):
         self.assertTrue((Path(self.dir) / '.graph/runs/r1/graph.mmd').exists())
 
 
+
+class Checks(GraphCase):
+    def test_complete_runs_check_and_stores_result(self):
+        self.init()
+        self.node('a', 'complete', '--check', 'echo hi')
+        n = self.state()['nodes'][0]
+        self.assertEqual((n['status'], n['check_exit']), ('complete', 0))
+        self.assertIn('hi', n['check_output'])
+
+    def test_failing_check_refuses_and_marks_failed(self):
+        self.init()
+        r = self.node('a', 'complete', '--check', 'echo boom; exit 4', code=3)
+        self.assertIn('check failed', r.stderr)
+        n = self.state()['nodes'][0]
+        self.assertEqual((n['status'], n['check_exit']), ('failed', 4))
+        self.assertIn('boom', n['check_output'])
+
+    def test_check_timeout_fails(self):
+        self.init()
+        self.node('a', 'complete', '--check', f'"{sys.executable}" -c "import time; time.sleep(5)"', '--check-timeout', '1', code=3)
+        self.assertIsNone(self.state()['nodes'][0]['check_exit'])
+
+    def test_output_tail_is_40_lines(self):
+        self.init()
+        self.node('a', 'complete', '--check', f'"{sys.executable}" -c "print(*range(100), sep=chr(10)); raise SystemExit(1)"', code=3)
+        lines = self.state()['nodes'][0]['check_output'].splitlines()
+        self.assertEqual((len(lines), lines[-1]), (40, '99'))
+
+    def test_bad_fields_exit_2(self):
+        self.init()
+        self.node('a', 'pending', '--target', 'toaster', code=2)
+        self.node('a', 'pending', '--risk', 'medium', code=2)
+        self.node('a', 'pending', '--check', ' ', code=2)
+
+    def test_validate_catches_bad_stored_field(self):
+        self.init()
+        self.node('a', 'pending', '--target', 'web', '--risk', 'high')
+        self.g('validate', 'r1')
+        p = Path(self.dir) / '.graph/runs/r1/state.json'
+        d = json.loads(p.read_text(encoding='utf-8')); d['nodes'][0]['target'] = 'x'
+        p.write_text(json.dumps(d), encoding='utf-8')
+        self.g('validate', 'r1', code=1)
+
+    def test_brief_has_goal_check_output_attempt(self):
+        self.init()
+        self.node('a', 'running', '--check', 'echo nope; exit 1', '--goal', 'Make it work')
+        self.node('a', 'complete', code=3)
+        out = self.g('brief', 'r1', 'a').stdout
+        for want in ('Make it work', 'echo nope', 'nope', 'attempt 2 of 3'):
+            self.assertIn(want, out)
+        self.g('brief', 'r1', 'zzz', code=2)
+
+    def test_verify_plan(self):
+        self.init()
+        self.node('a', 'pending', '--target', 'web', '--risk', 'high')
+        self.node('b', 'pending', '--target', 'none')
+        out = self.g('verify-plan', 'r1', 'a').stdout
+        self.assertIn('1. build, tests, http status', out)
+        self.assertIn('High risk', out)
+        self.assertIn('no extra verification', self.g('verify-plan', 'r1', 'b').stdout)
+        self.g('verify-plan', 'r1', 'zzz', code=2)
+
 if __name__ == '__main__':
     unittest.main()
