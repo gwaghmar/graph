@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Graph Skill runtime: a plan gate and run recorder. Rules are enforced here, not in prompts."""
 from __future__ import annotations
-import argparse, contextlib, hashlib, html, json, os, shlex, shutil, subprocess, sys, time, uuid
+import argparse, contextlib, hashlib, html, json, os, re, shlex, shutil, subprocess, sys, time, uuid
 from pathlib import Path
 
 ROOT = Path('.graph/runs')
@@ -305,20 +305,113 @@ def summary_text(d):
     lines.append(rule)
     return '\n'.join(lines)
 
+def build_summary(d):
+    """Plain-language run summary built only from state. Short sentences, no claim the state does not show."""
+    nodes=d.get('nodes',[]); status=d.get('status','unknown')
+    failed=[n for n in nodes if n.get('status')=='failed']
+    open_=[n for n in nodes if n.get('status') not in DONE and n.get('status')!='failed']
+    q=d.get('quality',[]); lastq=[x for x in q if x.get('batch')==q[-1].get('batch')] if q else []
+    badq=[x for x in lastq if x.get('status') in ('failed','timeout')]
+    said={'complete':'The run is complete. All nodes are done and the checks passed.',
+          'complete-unverified':'The run is done, but no check proved the work. Treat it as unverified.',
+          'failed':'The run failed.'}.get(status,f'The run is not finished. Status is {status}.')
+    if status=='complete' and (failed or open_ or badq): said='The run says complete, but the state shows open problems. Do not trust it.'
+    L=['# Run summary','',said,'','## What you asked','',d.get('task','') or 'No task recorded.','','## What changed','']
+    if nodes:
+        for n in nodes:
+            f=n.get('files',[])
+            L.append(f"- Node {n['id']} ({n.get('role','')}) is {n.get('status')}." + (f" Files: {', '.join(f)}." if f else ' No files recorded.'))
+    else: L.append('- No nodes were recorded.')
+    L+=['','## What was checked','']
+    checks=0
+    for n in nodes:
+        if n.get('check_exit') is not None or n.get('check_output'):
+            checks+=1; ok=n.get('check_exit')==0
+            L.append(f"- Node {n['id']}: check `{n.get('check','')}` {'passed' if ok else 'failed'} (exit {n.get('check_exit')}).")
+        elif n.get('status') in DONE and n.get('status')!='skipped' and not n.get('check'):
+            L.append(f"- Node {n['id']}: no check ran. Nothing proves this node.")
+    for x in q:
+        checks+=1; L.append(f"- Quality check `{x.get('command','')}`: {x.get('status','unknown')}.")
+    if not checks and not any(l.startswith('- Node') for l in L[L.index('## What was checked'):]): L.append('- No check ran.')
+    L+=['','## What failed','']
+    out=[f"- Node {n['id']} failed after {n.get('attempts',0)} attempt(s)." + (f" Check exit was {n['check_exit']}." if n.get('check_exit') not in (None,0) else '') for n in failed]
+    out+=[f"- Quality check `{x.get('command','')}` {x.get('status')}." for x in badq]
+    L+=out or ['- Nothing failed.']
+    L+=['','## What you must do next','']
+    todo=[f"- Fix node {n['id']}. Run the brief command for it and retry with a fresh agent." for n in failed]
+    todo+=[f"- Fix the failing check `{x.get('command','')}`, then run quality again." for x in badq]
+    todo+=[f"- Finish node {n['id']}. It is {n.get('status')}." for n in open_]
+    if status=='complete-unverified': todo.append('- Test the result yourself. No check proved it.')
+    todo+=[f"- {g}" for g in d.get('access_gaps',[])]
+    L+=todo or ['- Nothing. All nodes are done and checked.']
+    return '\n'.join(L)+'\n'
+
+def verify_plans(d):
+    """Verify steps per node with a target, from a preflight scan. Empty on any scan problem."""
+    nodes=[n for n in d.get('nodes',[]) if (n.get('target') or 'none')!='none']
+    if not nodes: return {}
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import preflight
+        r=preflight.scan(Path.cwd(), Path.home(), os.environ)
+        return {n['id']:[list(x) for x in verify_steps(n,r)] for n in nodes}
+    except Exception: return {}
+
+def md_html(text):
+    out=[]; items=[]
+    def flush():
+        if items: out.append('<ul>'+''.join(items)+'</ul>'); items.clear()
+    for line in text.splitlines():
+        e=html.escape(line)
+        if line.startswith('- '): items.append('<li>'+re.sub(r'`([^`]*)`',r'<code>\1</code>',html.escape(line[2:]))+'</li>'); continue
+        flush()
+        if line.startswith('## '): out.append(f'<h3>{html.escape(line[3:])}</h3>')
+        elif line.startswith('# '): out.append(f'<h2>{html.escape(line[2:])}</h2>')
+        elif line.strip(): out.append(f'<p>{e}</p>')
+    flush(); return '\n'.join(out)
+
+def node_evidence(n, steps):
+    e=html.escape; st=n.get('status','')
+    rows=[f"<b>Status:</b> {e(st)} · <b>Attempts:</b> {n.get('attempts',0)}"]
+    if n.get('files'): rows.append('<b>Files:</b> '+e(', '.join(n['files'])))
+    if n.get('target'): rows.append(f"<b>Target:</b> {e(n['target'])} · <b>Risk:</b> {e(n.get('risk') or 'low')}")
+    if n.get('check'):
+        code='no result' if n.get('check_exit') is None and not n.get('check_output') else f"exit {n.get('check_exit')}"
+        rows.append(f"<b>Check:</b> <code>{e(n['check'])}</code> · {code}")
+        out=n.get('check_output')
+        if out: rows.append(f"<details><summary>Output tail</summary><pre>{e(out)}</pre></details>")
+    else: rows.append('<b>Check:</b> none')
+    if steps: rows.append('<b>Verify steps:</b><ol>'+''.join(f"<li>{e(a)}" + ('' if b=='ok' else f" <span class=bad>missing</span>: {e(c)}") + '</li>' for a,b,c in steps)+'</ol>')
+    return f'<section class="card ev {e(st)}"><h3>{e(n["id"])} <small>{e(n.get("role",""))}</small></h3>'+''.join(f'<p>{r}</p>' if not r.startswith('<details') and not r.startswith('<b>Verify') else r for r in rows)+'</section>'
+
+CSS=""":root{--bg:#fff;--fg:#1d2127;--card:#f5f6f8;--line:#d5d9df;--mute:#5d6672;--ok:#1b7f4d;--bad:#c62828;--warn:#9a6700}
+@media(prefers-color-scheme:dark){:root{--bg:#0b0d10;--fg:#e8eaed;--card:#15191f;--line:#2a3038;--mute:#9aa0a6;--ok:#52b788;--bad:#ff6b6b;--warn:#ffd166}}
+body{font-family:system-ui,sans-serif;background:var(--bg);color:var(--fg);margin:0;line-height:1.5}main{max-width:1000px;margin:auto;padding:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin:14px 0}h1{font-size:1.4rem}h3{margin:.6em 0 .2em}small,.muted{color:var(--mute)}
+.node rect{fill:var(--card);stroke:var(--mute);stroke-width:2}.node.complete rect,.node.cached rect{stroke:var(--ok)}.node.failed rect{stroke:var(--bad)}.node.running rect,.node.retrying rect{stroke:var(--warn)}.node.skipped rect{stroke-dasharray:4}
+text{fill:var(--fg);font-size:12px}svg{width:100%;height:auto}line{stroke:var(--mute)}pre{white-space:pre-wrap;word-break:break-word;overflow-x:auto}code{word-break:break-all}.bad{color:var(--bad)}.ev.failed{border-color:var(--bad)}.ev.complete{border-color:var(--ok)}"""
+
 def render_files(p,d):
-    out=p.parent; mm=mermaid(d); (out/'graph.mmd').write_text(mm, encoding='utf-8')
-    s=stats(d)
+    out=p.parent; (out/'graph.mmd').write_text(mermaid(d), encoding='utf-8')
     running=not d.get('finished_at') and d.get('status') not in ('complete','complete-unverified','failed')
     refresh='<meta http-equiv="refresh" content="2">' if running else ''
-    live=' · <span class="live">● live — refreshes every 2s</span>' if running else ''
-    payload=json.dumps(d).replace('<','\\u003c')
-    page=f'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">{refresh}<title>Graph run {html.escape(d['id'])}</title>
-<style>body{{font-family:Inter,system-ui;background:#0b0d10;color:#e8eaed;margin:0}}main{{max-width:1200px;margin:auto;padding:28px}}.grid{{display:grid;grid-template-columns:2fr 1fr;gap:18px}}.card{{background:#15191f;border:1px solid #2a3038;border-radius:14px;padding:18px}}.stats{{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:16px 0}}.stat{{background:#15191f;border:1px solid #2a3038;border-radius:10px;padding:12px}}.node{{cursor:pointer}}.node rect{{fill:#20262e;stroke:#59636f;stroke-width:2}}.node.complete rect,.node.cached rect{{stroke:#52b788}}.node.failed rect{{stroke:#ff6b6b}}.node.running rect,.node.retrying rect{{stroke:#ffd166}}.node.skipped rect{{stroke:#9aa0a6;stroke-dasharray:4}}text{{fill:#e8eaed;font-size:12px}}pre{{white-space:pre-wrap}}table{{width:100%;border-collapse:collapse}}td,th{{border-bottom:1px solid #2a3038;padding:8px;text-align:left}}small,.muted{{color:#9aa0a6}}.live{{color:#ffd166}}@media(max-width:800px){{.grid{{grid-template-columns:1fr}}.stats{{grid-template-columns:repeat(2,1fr)}}}}</style></head><body><main>
-<h1>Graph run {html.escape(d['id'])}</h1><p>{html.escape(d['task'])}</p><p class="muted">Host: {html.escape(str(d.get('host') or 'unknown'))} · Updated: {html.escape(d.get('updated_at',''))} {live}</p>
-<div class="stats">{''.join(f'<div class="stat"><small>{k.replace("_"," ").title()}</small><div><b>{v:,}</b></div></div>' for k,v in s.items())}</div>
-<div class="grid"><section class="card"><h2>Execution graph</h2><svg id="graph" width="100%" viewBox="0 0 900 500"></svg></section><aside class="card"><h2>Node details</h2><pre id="details">Select a node</pre></aside></div>
-<section class="card" style="margin-top:18px"><h2>Quality checks</h2><table><thead><tr><th>Command</th><th>Status</th><th>Duration</th></tr></thead><tbody>{''.join(f'<tr><td>{html.escape(q.get("command",""))}</td><td>{html.escape(q.get("status",""))}</td><td>{q.get("duration_ms",0)} ms</td></tr>' for q in d.get('quality',[])) or '<tr><td colspan="3">No checks recorded</td></tr>'}</tbody></table></section>
-<script>const data={payload};const svg=document.getElementById('graph'),details=document.getElementById('details');const nodes=data.nodes||[];const levels={{}};function level(n,seen=new Set()){{if(levels[n.id]!=null)return levels[n.id];if(seen.has(n.id))return 0;seen.add(n.id);let deps=n.depends_on||[];return levels[n.id]=deps.length?1+Math.max(...deps.map(id=>{{let d=nodes.find(x=>x.id===id);return d?level(d,new Set(seen)):0}})):0}}nodes.forEach(n=>level(n));let by={{}};nodes.forEach(n=>(by[levels[n.id]]??=[]).push(n));let pos={{}};Object.keys(by).forEach(l=>by[l].forEach((n,i)=>pos[n.id]={{x:40+Number(l)*210,y:40+i*95}}));const ps=Object.values(pos);if(ps.length)svg.setAttribute('viewBox',`0 0 ${{Math.max(600,...ps.map(q=>q.x+190))}} ${{Math.max(200,...ps.map(q=>q.y+96))}}`);nodes.forEach(n=>(n.depends_on||[]).forEach(dep=>{{if(!pos[dep]||!pos[n.id])return;svg.insertAdjacentHTML('beforeend',`<line x1="${{pos[dep].x+150}}" y1="${{pos[dep].y+28}}" x2="${{pos[n.id].x}}" y2="${{pos[n.id].y+28}}" stroke="#59636f" stroke-width="2"/>`)}}));const NS='http://www.w3.org/2000/svg';nodes.forEach(n=>{{let p=pos[n.id];let g=document.createElementNS(NS,'g');g.setAttribute('class','node '+n.status);let rect=document.createElementNS(NS,'rect');rect.setAttribute('x',p.x);rect.setAttribute('y',p.y);rect.setAttribute('width',150);rect.setAttribute('height',56);rect.setAttribute('rx',9);let t1=document.createElementNS(NS,'text');t1.setAttribute('x',p.x+10);t1.setAttribute('y',p.y+22);t1.textContent=n.id;let t2=document.createElementNS(NS,'text');t2.setAttribute('x',p.x+10);t2.setAttribute('y',p.y+42);t2.textContent=n.status;g.append(rect,t1,t2);g.onclick=()=>{{details.textContent=JSON.stringify(n,null,2)}};svg.appendChild(g)}});</script></main></body></html>'''
+    live=' · live, refreshes every 2s' if running else ''
+    payload=json.dumps({'nodes':d.get('nodes',[])}).replace('<','\\u003c')
+    steps=d.get('verify_steps') or {}
+    ev=''.join(node_evidence(n,steps.get(n['id'])) for n in d.get('nodes',[]))
+    page=f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">{refresh}<title>Graph run {html.escape(d['id'])}</title><style>{CSS}</style></head><body><main>
+<h1>Graph run {html.escape(d['id'])} <small>{html.escape(str(d.get('status','')))}</small></h1><p class="muted">Updated {html.escape(d.get('updated_at',''))}{live}</p>
+<section class="card">{md_html(build_summary(d))}</section>
+<section class="card"><h2>Diagram</h2><svg id="graph" viewBox="0 0 900 300" role="img" aria-label="Execution graph"></svg></section>
+<h2>Evidence per node</h2>{ev or '<p class="muted">No nodes yet.</p>'}
+<script>const nodes={payload}.nodes;const svg=document.getElementById('graph'),NS='http://www.w3.org/2000/svg',L={{}};
+function lv(n,s=new Set()){{if(L[n.id]!=null)return L[n.id];if(s.has(n.id))return 0;s.add(n.id);const d=n.depends_on||[];return L[n.id]=d.length?1+Math.max(...d.map(i=>{{const x=nodes.find(y=>y.id===i);return x?lv(x,new Set(s)):0}})):0}}
+nodes.forEach(n=>lv(n));const by={{}},pos={{}};nodes.forEach(n=>(by[L[n.id]]??=[]).push(n));
+Object.keys(by).forEach(l=>by[l].forEach((n,i)=>pos[n.id]={{x:20+l*190,y:20+i*80}}));const ps=Object.values(pos);
+if(ps.length)svg.setAttribute('viewBox',`0 0 ${{Math.max(400,...ps.map(q=>q.x+170))}} ${{Math.max(120,...ps.map(q=>q.y+76))}}`);
+function el(t,a,x){{const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);if(x!=null)e.textContent=x;return e}}
+nodes.forEach(n=>(n.depends_on||[]).forEach(d=>{{if(pos[d]&&pos[n.id])svg.appendChild(el('line',{{x1:pos[d].x+150,y1:pos[d].y+28,x2:pos[n.id].x,y2:pos[n.id].y+28,'stroke-width':2}}))}}));
+nodes.forEach(n=>{{const p=pos[n.id],g=el('g',{{class:'node '+n.status}});g.append(el('rect',{{x:p.x,y:p.y,width:150,height:56,rx:9}}),el('text',{{x:p.x+10,y:p.y+22}},n.id),el('text',{{x:p.x+10,y:p.y+42}},n.status));svg.appendChild(g)}});</script></main></body></html>"""
     (out/'graph.html').write_text(page, encoding='utf-8')
 
 def cmd_render(a):
@@ -433,7 +526,12 @@ def cmd_finish(a):
             if bad: die(3,f"Refused: latest quality run failed ({'; '.join(bad)}). Fix it and run quality again, or use --status failed.")
         else:
             status='complete-unverified'; print('No quality checks were detected: run recorded as complete-unverified.')
-    d['status']=status; d['finished_at']=now(); d['updated_at']=now(); save(p,d); render_files(p,d); print(summary_text(d))
+    d['status']=status; d['finished_at']=now(); d['updated_at']=now()
+    d['verify_steps']=verify_plans(d)
+    d['access_gaps']=[f"Node {i} could not be fully verified: {a} is missing. Workaround: {c}." for i,st in d['verify_steps'].items() for a,b,c in st if b!='ok']
+    save(p, d); render_files(p, d)
+    text=build_summary(d); (p.parent/'summary.md').write_text(text, encoding='utf-8')
+    print(text); print(f"Report: {p.parent/'graph.html'}")
 
 def cmd_tree(a):
     _,d=load(a.run); print(ascii_graph(d))

@@ -223,3 +223,44 @@ class Checks(GraphCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class Summary(GraphCase):
+    def summary(self):
+        return (Path(self.dir) / '.graph/runs/r1/summary.md').read_text(encoding='utf-8')
+
+    def test_complete_with_passing_check(self):
+        self.init()
+        self.node('a', 'running'); self.node('a', 'complete', '--check', 'exit 0', '--files', 'x.py')
+        self.quality(f'"{sys.executable}" -c "pass"', 0)
+        r = self.g('finish', 'r1')
+        s = self.summary()
+        self.assertIn('The run is complete.', s)
+        self.assertIn('x.py', s); self.assertIn('passed (exit 0)', s)
+        self.assertIn('Nothing failed.', s)
+        self.assertIn('summary', r.stdout.lower()); self.assertIn('graph.html', r.stdout)
+
+    def test_unverified_never_claims_success(self):
+        self.init()
+        self.node('a', 'running'); self.node('a', 'complete')
+        self.g('finish', 'r1')
+        s = self.summary()
+        self.assertIn('unverified', s); self.assertNotIn('The run is complete.', s)
+        self.assertIn('no check ran', s.lower()); self.assertIn('Test the result yourself', s)
+
+    def test_failed_node_summary(self):
+        self.init()
+        self.node('a', 'running'); self.node('a', 'complete', '--check', 'echo boom; exit 3', code=3)
+        self.g('finish', 'r1', '--status', 'failed')
+        s = self.summary()
+        self.assertIn('The run failed.', s)
+        self.assertIn('Node a failed', s); self.assertIn('exit was 3', s); self.assertIn('Fix node a', s)
+
+    def test_html_has_summary_and_evidence(self):
+        self.init()
+        self.node('a', 'running'); self.node('a', 'complete', '--check', 'echo hello_out; exit 0')
+        self.g('finish', 'r1')
+        h = (Path(self.dir) / '.graph/runs/r1/graph.html').read_text(encoding='utf-8')
+        self.assertLess(h.index('Run summary'), h.index('Diagram'))
+        self.assertIn('hello_out', h); self.assertIn('<details>', h)
+        self.assertIn('prefers-color-scheme', h); self.assertNotIn('http://', h.replace('http://www.w3.org/2000/svg', ''))
