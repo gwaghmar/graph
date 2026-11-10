@@ -10,9 +10,9 @@ import preflight  # noqa: E402
 AUTH_WORDS = ('whoami', 'auth', 'projects')
 
 
-def fake_run(cmd, **kw):
+def fake_run(cmd, timeout, shell=False, merge=False, capture=True):
     out = 'alice-account\n' if any(w in cmd for w in AUTH_WORDS) else 'v1.2.3\n'
-    return SimpleNamespace(returncode=0, stdout=out if kw.get('stdout') == subprocess.PIPE else None, stderr=None)
+    return 0, out if capture else '', '', False
 
 
 class PreflightCase(unittest.TestCase):
@@ -28,7 +28,7 @@ class PreflightCase(unittest.TestCase):
 
     def with_tools(self, which=lambda n: '/bin/' + n):
         return mock.patch.multiple('preflight.shutil', which=mock.Mock(side_effect=which)), \
-               mock.patch('preflight.subprocess.run', side_effect=fake_run)
+               mock.patch('preflight.run_proc', side_effect=fake_run)
 
     def test_privacy_no_account_names_by_default(self):
         w, r = self.with_tools()
@@ -40,8 +40,7 @@ class PreflightCase(unittest.TestCase):
         auth = [c for c in run.call_args_list if any(x in c.args[0] for x in AUTH_WORDS)]
         self.assertTrue(auth)
         for c in auth:
-            self.assertEqual(c.kwargs['stdout'], subprocess.DEVNULL)
-            self.assertEqual(c.kwargs['stderr'], subprocess.DEVNULL)
+            self.assertIs(c.kwargs['capture'], False)
 
     def test_account_names_only_with_flag(self):
         w, r = self.with_tools()
@@ -51,7 +50,7 @@ class PreflightCase(unittest.TestCase):
 
     def test_fail_soft_when_everything_breaks(self):
         with mock.patch('preflight.shutil.which', side_effect=OSError('boom')), \
-             mock.patch('preflight.subprocess.run', side_effect=subprocess.TimeoutExpired('x', 2)):
+             mock.patch('preflight.run_proc', side_effect=subprocess.TimeoutExpired('x', 2)):
             res = self.scan(env={'CLAUDECODE': '1'})
         self.assertEqual(res['access'], {'gh': 'unknown', 'vercel': 'unknown', 'supabase': 'unknown'})
         self.assertIsNone(res['clis']['git']['present'])
@@ -59,11 +58,11 @@ class PreflightCase(unittest.TestCase):
         self.assertIn('env:', preflight.summary(res))
 
     def test_timeout_on_auth_is_unknown(self):
-        def run(cmd, **kw):
-            if 'whoami' in cmd: raise subprocess.TimeoutExpired(cmd, 2)
-            return fake_run(cmd, **kw)
+        def run(cmd, timeout, **kw):
+            if 'whoami' in cmd: return None, '', '', True
+            return fake_run(cmd, timeout, **kw)
         with mock.patch('preflight.shutil.which', side_effect=lambda n: '/bin/' + n), \
-             mock.patch('preflight.subprocess.run', side_effect=run):
+             mock.patch('preflight.run_proc', side_effect=run):
             res = self.scan()
         self.assertEqual(res['access']['vercel'], 'unknown')
         self.assertEqual(res['access']['gh'], 'ok')
@@ -89,7 +88,7 @@ class PreflightCase(unittest.TestCase):
         (self.cwd / '.cursor' / 'rules' / 'a.mdc').write_text('---\nalwaysApply: true\n---\nbody secret', encoding='utf-8')
         (self.cwd / 'CLAUDE.md').write_text('private', encoding='utf-8')
         with mock.patch('preflight.shutil.which', return_value=None), \
-             mock.patch('preflight.subprocess.run', side_effect=fake_run):
+             mock.patch('preflight.run_proc', side_effect=fake_run):
             res = self.scan()
         self.assertEqual(res['mcp'], ['codexsrv', 'g1', 'github', 'p1'])
         self.assertEqual(res['skills'], ['my-skill'])

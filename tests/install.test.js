@@ -91,6 +91,20 @@ test('legacy 0.x files are removed only when they carry the marker', () => {
   assert.match(r.stdout, /\.cursor\/rules\/graph\.mdc was not made by graph-skill/);
 });
 
+test('0.x agent files and the old OpenClaw skill are migrated', () => {
+  const c = setup();
+  const fx = (n) => fs.readFileSync(path.join(__dirname, 'fixtures-legacy', n), 'utf8');
+  const w = (rel, text) => { const p = path.join(c.proj, rel); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, text); };
+  w('.claude/agents/graph-worker.md', fx('graph-worker.md'));
+  w('.agents/skills/graph/SKILL.md', fx('openclaw-SKILL.md'));
+  run(c, ['install']);
+  assert.equal(exists(c.proj, '.claude/agents/graph-worker.md'), false);
+  assert.ok(exists(c.proj, '.agents/skills/graph/.graph-skill-owner'));
+  assert.ok(exists(c.proj, '.agents/skills/graph/scripts/graph.py'));
+  run(c, ['install']);
+  assert.ok(exists(c.proj, '.agents/skills/graph/scripts/graph.py'));
+});
+
 test('doctor runs and reports hosts', () => {
   const c = setup();
   const r = run(c, ['doctor'], 'claude');

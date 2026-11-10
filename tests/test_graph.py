@@ -22,6 +22,9 @@ class GraphCase(unittest.TestCase):
     def node(self, nid, status, *extra, code=0):
         return self.g('node', 'r1', nid, '--role', 'worker', '--status', status, *extra, code=code)
 
+    def ran(self, nid, *extra):
+        self.node(nid, 'running', *extra); self.node(nid, 'complete')
+
     def state(self):
         return json.loads((Path(self.dir) / '.graph/runs/r1/state.json').read_text(encoding='utf-8'))
 
@@ -37,8 +40,11 @@ class Rules(GraphCase):
 
     def test_all_valid_statuses_accepted(self):
         self.init()
-        for st in ('pending', 'skipped', 'cached', 'failed'):
-            self.node('n_' + st, st)
+        self.node('n_pending', 'pending')
+        self.node('n_skipped', 'skipped', '--reason', 'not needed')
+        self.node('n_failed', 'running'); self.node('n_failed', 'failed')
+        self.node('n_cached', 'cached', code=3)
+        self.node('n_skip2', 'skipped', code=3)
 
     def test_unknown_run_exits_2(self):
         self.g('next', 'nope', code=2)
@@ -48,9 +54,9 @@ class Rules(GraphCase):
         self.node('a', 'pending')
         self.node('b', 'pending', '--depends-on', 'a')
         self.assertEqual(self.g('next', 'r1').stdout.split(), ['a'])
-        self.node('a', 'running'); self.node('a', 'complete')
+        self.ran('a')
         self.assertEqual(self.g('next', 'r1').stdout.split(), ['b'])
-        self.node('b', 'complete')
+        self.ran('b')
         self.assertEqual(self.g('next', 'r1').stdout.strip(), 'none')
 
     def test_next_includes_failed_with_retries_left_only(self):
@@ -67,7 +73,7 @@ class Rules(GraphCase):
         r = self.node('b', 'running', code=3)
         self.assertIn('waiting on a', r.stderr)
         self.node('b', 'retrying', code=3)
-        self.node('a', 'skipped')
+        self.node('a', 'skipped', '--reason', 'not needed')
         self.node('b', 'running')
 
     def test_retry_cap_default_is_two(self):
@@ -92,22 +98,33 @@ class Rules(GraphCase):
         self.assertNotIn('finished_at', self.state())
 
     def test_finish_refused_when_quality_failed(self):
-        self.init()
-        self.node('a', 'complete')
-        self.quality(f'"{sys.executable}" -c "raise SystemExit(1)"', 1)
+        self.init('--quality-command', f'"{sys.executable}" -c "raise SystemExit(1)"')
+        self.ran('a')
+        self.g('finish', 'r1', code=3)
+        self.g('quality', 'r1', code=1)
         self.g('finish', 'r1', code=3)
 
     def test_finish_ok_when_latest_quality_passed(self):
-        self.init()
-        self.node('a', 'complete')
-        self.quality(f'"{sys.executable}" -c "raise SystemExit(1)"', 1)
-        self.quality(f'"{sys.executable}" -c "pass"', 0)
+        flip = f'"{sys.executable}" -c "import os,sys; sys.exit(0 if os.path.exists(\'ok\') else 1)"'
+        self.init('--quality-command', flip)
+        self.ran('a')
+        self.g('quality', 'r1', code=1)
+        Path(self.dir, 'ok').write_text('x', encoding='utf-8')
+        self.g('quality', 'r1')
         self.g('finish', 'r1')
         self.assertEqual(self.state()['status'], 'complete')
 
+    def test_extra_command_cannot_hide_failed_required(self):
+        self.init('--quality-command', f'"{sys.executable}" -c "raise SystemExit(1)"')
+        self.ran('a')
+        self.g('quality', 'r1', code=1)
+        self.quality(f'"{sys.executable}" -c "pass"', 0)
+        r = self.g('finish', 'r1', code=3)
+        self.assertIn('required', r.stderr)
+
     def test_finish_without_checks_is_unverified(self):
         self.init()
-        self.node('a', 'complete')
+        self.ran('a')
         r = self.g('finish', 'r1')
         self.assertIn('complete-unverified', r.stdout)
         self.assertEqual(self.state()['status'], 'complete-unverified')
@@ -125,7 +142,7 @@ class Rules(GraphCase):
 
     def test_completed_run_not_resumable(self):
         self.init()
-        self.node('a', 'complete')
+        self.ran('a')
         self.g('finish', 'r1')
         self.g('resume', code=2)
 
@@ -152,7 +169,7 @@ class Rules(GraphCase):
 
     def test_report_has_no_timeline(self):
         self.init()
-        self.node('a', 'complete')
+        self.ran('a')
         html = (Path(self.dir) / '.graph/runs/r1/graph.html').read_text(encoding='utf-8')
         self.assertNotIn('Timeline', html)
         self.assertNotIn('Critical', html)
@@ -160,17 +177,87 @@ class Rules(GraphCase):
 
 
 
+class Review(GraphCase):
+    def test_cannot_jump_to_complete_or_skip(self):
+        self.init()
+        self.node('a', 'pending'); self.node('b', 'pending', '--depends-on', 'a')
+        self.node('b', 'complete', code=3)
+        self.node('b', 'skipped', '--reason', 'x', code=3)
+        self.node('a', 'complete', code=3)
+        self.assertEqual(self.state()['nodes'][1]['status'], 'pending')
+
+    def test_zero_retries_cannot_complete_directly(self):
+        self.init('--max-retries', '0')
+        self.node('a', 'running'); self.node('a', 'failed')
+        self.node('a', 'complete', code=3)
+
+    def test_check_is_locked(self):
+        self.init()
+        self.node('a', 'pending', '--check', 'exit 1')
+        self.node('a', 'running')
+        self.node('a', 'complete', '--check', 'true', code=3)
+        self.node('a', 'complete', code=3)
+        self.assertEqual(self.state()['nodes'][0]['check'], 'exit 1')
+
+    def test_dependencies_locked_after_start(self):
+        self.init()
+        self.node('a', 'pending'); self.node('b', 'pending', '--depends-on', 'a')
+        self.node('b', 'pending', '--depends-on')
+        self.node('b', 'pending', '--depends-on', 'a')
+        self.node('x', 'running')
+        self.node('b', 'running', '--depends-on', code=3)
+        self.node('b', 'running', code=3)
+
+    def test_init_refuses_existing_and_bad_ids(self):
+        self.init()
+        self.node('a', 'pending')
+        self.g('init', 'task', '--id', 'r1', code=3)
+        self.assertEqual(len(self.state()['nodes']), 1)
+        self.g('init', 'task', '--id', '../escaped', code=2)
+        self.assertFalse((Path(self.dir).parent / 'escaped').exists())
+
+    def test_gitignore_written(self):
+        self.init()
+        self.assertEqual((Path(self.dir) / '.graph/.gitignore').read_text(encoding='utf-8'), '*\n')
+
+    def test_summary_names_skipped_nodes(self):
+        self.init('--quality-command', f'"{sys.executable}" -c "pass"')
+        self.node('a', 'skipped', '--reason', 'x'); self.ran('b')
+        self.g('quality', 'r1')
+        self.g('finish', 'r1')
+        s = (Path(self.dir) / '.graph/runs/r1/summary.md').read_text(encoding='utf-8')
+        self.assertIn('Skipped or cached: a', s)
+        self.assertIn('No check ran for: b', s)
+
+    def test_check_timeout_kills_process(self):
+        if os.name == 'nt': self.skipTest('POSIX process group check')
+        self.init()
+        marker = Path(self.dir) / 'alive'
+        cmd = f'"{sys.executable}" -c "import time,pathlib; time.sleep(2); pathlib.Path(\'alive\').write_text(\'x\')"'
+        self.node('a', 'running', '--check', cmd)
+        self.node('a', 'complete', '--check-timeout', '1', code=3)
+        import time; time.sleep(2.5)
+        self.assertFalse(marker.exists())
+
+    def test_pytest_not_detected_for_js_tests_folder(self):
+        self.init()
+        Path(self.dir, 'tests').mkdir()
+        Path(self.dir, 'tests', 'a.test.js').write_text('//', encoding='utf-8')
+        self.assertIn('No local quality command', self.g('quality', 'r1').stdout)
+
+
 class Checks(GraphCase):
     def test_complete_runs_check_and_stores_result(self):
         self.init()
-        self.node('a', 'complete', '--check', 'echo hi')
+        self.node('a', 'running', '--check', 'echo hi'); self.node('a', 'complete')
         n = self.state()['nodes'][0]
         self.assertEqual((n['status'], n['check_exit']), ('complete', 0))
         self.assertIn('hi', n['check_output'])
 
     def test_failing_check_refuses_and_marks_failed(self):
         self.init()
-        r = self.node('a', 'complete', '--check', 'echo boom; exit 4', code=3)
+        self.node('a', 'running', '--check', 'echo boom; exit 4')
+        r = self.node('a', 'complete', code=3)
         self.assertIn('check failed', r.stderr)
         n = self.state()['nodes'][0]
         self.assertEqual((n['status'], n['check_exit']), ('failed', 4))
@@ -178,12 +265,14 @@ class Checks(GraphCase):
 
     def test_check_timeout_fails(self):
         self.init()
-        self.node('a', 'complete', '--check', f'"{sys.executable}" -c "import time; time.sleep(5)"', '--check-timeout', '1', code=3)
+        self.node('a', 'running', '--check', f'"{sys.executable}" -c "import time; time.sleep(5)"')
+        self.node('a', 'complete', '--check-timeout', '1', code=3)
         self.assertIsNone(self.state()['nodes'][0]['check_exit'])
 
     def test_output_tail_is_40_lines(self):
         self.init()
-        self.node('a', 'complete', '--check', f'"{sys.executable}" -c "print(*range(100), sep=chr(10)); raise SystemExit(1)"', code=3)
+        self.node('a', 'running', '--check', f'"{sys.executable}" -c "print(*range(100), sep=chr(10)); raise SystemExit(1)"')
+        self.node('a', 'complete', code=3)
         lines = self.state()['nodes'][0]['check_output'].splitlines()
         self.assertEqual((len(lines), lines[-1]), (40, '99'))
 
@@ -230,9 +319,9 @@ class Summary(GraphCase):
         return (Path(self.dir) / '.graph/runs/r1/summary.md').read_text(encoding='utf-8')
 
     def test_complete_with_passing_check(self):
-        self.init()
-        self.node('a', 'running'); self.node('a', 'complete', '--check', 'exit 0', '--files', 'x.py')
-        self.quality(f'"{sys.executable}" -c "pass"', 0)
+        self.init('--quality-command', f'"{sys.executable}" -c "pass"')
+        self.node('a', 'running', '--check', 'exit 0', '--files', 'x.py'); self.node('a', 'complete')
+        self.g('quality', 'r1')
         r = self.g('finish', 'r1')
         s = self.summary()
         self.assertIn('The run is complete.', s)
@@ -242,7 +331,7 @@ class Summary(GraphCase):
 
     def test_unverified_never_claims_success(self):
         self.init()
-        self.node('a', 'running'); self.node('a', 'complete')
+        self.ran('a')
         self.g('finish', 'r1')
         s = self.summary()
         self.assertIn('unverified', s); self.assertNotIn('The run is complete.', s)
@@ -250,7 +339,7 @@ class Summary(GraphCase):
 
     def test_failed_node_summary(self):
         self.init()
-        self.node('a', 'running'); self.node('a', 'complete', '--check', 'echo boom; exit 3', code=3)
+        self.node('a', 'running', '--check', 'echo boom; exit 3'); self.node('a', 'complete', code=3)
         self.g('finish', 'r1', '--status', 'failed')
         s = self.summary()
         self.assertIn('The run failed.', s)
@@ -258,7 +347,7 @@ class Summary(GraphCase):
 
     def test_html_has_summary_and_evidence(self):
         self.init()
-        self.node('a', 'running'); self.node('a', 'complete', '--check', 'echo hello_out; exit 0')
+        self.node('a', 'running', '--check', 'echo hello_out; exit 0'); self.node('a', 'complete')
         self.g('finish', 'r1')
         h = (Path(self.dir) / '.graph/runs/r1/graph.html').read_text(encoding='utf-8')
         self.assertLess(h.index('Run summary'), h.index('Diagram'))
@@ -280,6 +369,8 @@ class ExportWorkflow(GraphCase):
         self.assertEqual(js.count('label: "a"'), 1)
         self.assertEqual(js.count('parallel('), 2)
         self.assertIn('--status running', js)
+        self.assertIn('{ title: "Level 1", detail: "a" }', js)
+        self.assertIn(Path(sys.executable).as_posix(), js)
         self.assertNotIn('Date.now', js); self.assertNotIn('Math.random', js)
         self.assertLess(js.index('label: "a"'), js.index('label: "b"'))
         node = shutil.which('node')

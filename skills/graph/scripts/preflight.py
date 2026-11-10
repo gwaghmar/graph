@@ -32,15 +32,36 @@ def read_json(p):
         return d if isinstance(d, dict) else {}
     except Exception: return {}
 
+def run_proc(cmd, timeout, shell=False, merge=False, capture=True):
+    """Run a command and kill its whole process tree on timeout. Return (code, stdout, stderr, timed_out).
+    shell=True is for plan commands only. On timeout the code is None."""
+    kw = {'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == 'nt' else {'start_new_session': True}
+    pipe = subprocess.PIPE if capture else subprocess.DEVNULL
+    p = subprocess.Popen(cmd, shell=shell, stdin=subprocess.DEVNULL, stdout=pipe,
+                         stderr=subprocess.STDOUT if merge and capture else pipe,
+                         text=True, encoding='utf-8', errors='replace', **kw)
+    try:
+        out, err = p.communicate(timeout=timeout)
+        return p.returncode, out or '', err or '', False
+    except subprocess.TimeoutExpired:
+        try:
+            if os.name == 'nt':
+                subprocess.run(['taskkill', '/T', '/F', '/PID', str(p.pid)], capture_output=True, timeout=10)
+            else:
+                os.killpg(p.pid, 9)
+        except Exception: p.kill()
+        try: out, err = p.communicate(timeout=5)
+        except Exception: out, err = '', ''
+        return None, out or '', err or '', True
+
 def run(cmd, capture=True):
     """Run a list command with a 2s timeout. Return (code, stdout, stderr), or None on any failure."""
     try:
         exe = shutil.which(cmd[0])
         if not exe: return None
-        out = subprocess.PIPE if capture else subprocess.DEVNULL
-        p = subprocess.run([exe] + cmd[1:], stdin=subprocess.DEVNULL, stdout=out, stderr=out,
-                           timeout=TIMEOUT, text=True, encoding='utf-8', errors='replace')
-        return p.returncode, p.stdout or '', p.stderr or ''
+        code, out, err, timed_out = run_proc([exe] + cmd[1:], TIMEOUT, capture=capture)
+        if timed_out: return None
+        return code, out, err
     except Exception: return None
 
 # ---- probes (each fails soft) ----

@@ -19,7 +19,7 @@ What the code does not enforce: that the host runs ready nodes in parallel, or t
 
 ## Preflight scan
 
-`graph.py preflight --needs git,deploy` scans your machine before planning. It checks which CLIs are installed (git, gh, vercel, supabase, node, docker and others), whether gh, vercel and supabase are logged in, and what you can use to verify work (headless browser, simulators). It picks the best tool for each job you name. The result is cached in `.graph/preflight.json`.
+`graph.py preflight --needs github,deploy` scans your machine before planning. It checks which CLIs are installed (git, gh, vercel, supabase, node, docker and others), whether gh, vercel and supabase are logged in, and what you can use to verify work (headless browser, simulators). It picks the best tool for each job you name. The result is cached in `.graph/preflight.json`.
 
 It records names and yes or no answers only. It never reads tokens or env values. Account names are shown only with `--with-accounts`.
 
@@ -45,7 +45,7 @@ It copies one skill folder to `.claude/skills/graph` and `.agents/skills/graph`.
 
 ```bash
 G="python3 .agents/skills/graph/scripts/graph.py"
-$G preflight --needs git,node
+$G preflight --needs github,deploy
 $G init "Add CSV export" --host claude --id r1
 $G node r1 scaffold --role worker --status pending
 $G node r1 api --role worker --status pending --depends-on scaffold \

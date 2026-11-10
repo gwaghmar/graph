@@ -9,6 +9,7 @@ All notable changes to this project are documented here.
 Graph is now a plan gate and run recorder. The rules are enforced in code.
 
 ### Added
+- Status moves are checked (no jump to complete or skipped), checks and dependencies lock when a node starts, `init` refuses an existing run id, the finish gate needs every required quality command (`init --quality-command`) to pass, timed-out commands are killed with their children, and `.graph/.gitignore` keeps run data out of git.
 - Rule enforcement in `graph.py`: a node cannot start before its dependencies finish, retries are capped, `--check` gates completion, and a run cannot finish while work is open or quality failed. Refusals exit 3 with one line.
 - `preflight` scan of installed CLIs, logins, and verification tools, with a job-to-tool picker.
 - `brief` (retry brief for a fresh subagent), `verify-plan`, `next`, and `export-workflow`.

@@ -4,9 +4,13 @@ from __future__ import annotations
 import argparse, contextlib, hashlib, html, json, os, re, shlex, shutil, subprocess, sys, time, uuid
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from preflight import run_proc
+
 ROOT = Path('.graph/runs')
 STATUSES = ('pending', 'running', 'retrying', 'complete', 'failed', 'skipped', 'cached')
 DONE = ('complete', 'cached', 'skipped')
+RUN_ID = re.compile(r'^[A-Za-z0-9_-]+$')
 
 def die(code, msg):
     print(msg, file=sys.stderr); raise SystemExit(code)
@@ -15,7 +19,18 @@ def die(code, msg):
 def now(): return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
 def epoch(): return time.time()
 
+def check_run_id(run_id):
+    if not RUN_ID.match(run_id or ''): die(2, f'Bad run id: {run_id!r}. Use only letters, digits, "_" and "-".')
+
+def ensure_ignore():
+    """Keep run history and the preflight cache out of git, on every install route."""
+    g = Path('.graph/.gitignore')
+    if g.exists(): return
+    with contextlib.suppress(OSError):
+        g.parent.mkdir(parents=True, exist_ok=True); g.write_text('*\n', encoding='utf-8')
+
 def load(run_id):
+    check_run_id(run_id)
     p = ROOT / run_id / 'state.json'
     if not p.exists(): die(2, f'Unknown run: {run_id}. Run "init" first or check the run id.')
     return p, json.loads(p.read_text(encoding='utf-8'))
@@ -64,10 +79,13 @@ def descendants(d, roots):
 def cmd_init(a):
     if a.max_retries < 0: die(2, '--max-retries must be 0 or more.')
     rid = a.id or uuid.uuid4().hex[:10]
+    check_run_id(rid)
+    if (ROOT / rid).exists(): die(3, f'Refused: run {rid} already exists. Pick a new --id, or continue it with "resume".')
+    ensure_ignore()
     p = ROOT / rid / 'state.json'
     data = {
         'schema_version': 3, 'id': rid, 'task': a.task, 'host': a.host, 'max_retries': a.max_retries,
-        'status': 'planning', 'created_at': now(), 'updated_at': now(),
+        'quality_commands': a.quality_command or [], 'status': 'planning', 'created_at': now(), 'updated_at': now(),
         'git': git_info(), 'nodes': [], 'events': [], 'quality': []
     }
     save(p, data); render_files(p, data); print(rid)
@@ -93,17 +111,40 @@ def tail_lines(text, n=40):
     return '\n'.join((text or '').splitlines()[-n:])
 
 def run_check(command, timeout):
-    """Run a plan check command. shell=True is used ONLY here: the command is a user or plan command
-    (it may contain pipes or &&), never built from untrusted input by this script."""
+    """Run a plan check command. shell=True is used ONLY for plan and quality commands: they may contain
+    pipes or &&, and are never built from untrusted input by this script."""
     started = epoch()
-    try:
-        r = subprocess.run(command, shell=True, text=True, encoding='utf-8', errors='replace',
-                           stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
-        code, out = r.returncode, r.stdout
-    except subprocess.TimeoutExpired as e:
-        out = e.stdout if isinstance(e.stdout, str) else (e.stdout or b'').decode('utf-8', 'replace')
-        code, out = None, (out or '') + f'\n[check timed out after {timeout}s]'
+    code, out, _, timed_out = run_proc(command, timeout, shell=True, merge=True)
+    if timed_out: code, out = None, out + f'\n[check timed out after {timeout}s]'
     return {'check_exit': code, 'check_output': tail_lines(out), 'check_ms': round((epoch() - started) * 1000)}
+
+# Allowed moves. A new node counts as pending. "retrying" is only reached from failed.
+MOVES = {'pending': ('pending', 'running', 'skipped'), 'running': ('running', 'complete', 'failed'),
+         'retrying': ('retrying', 'complete', 'failed'), 'failed': ('failed', 'retrying'),
+         'complete': ('complete',), 'skipped': ('skipped',), 'cached': ('cached',)}
+
+def guard(a, d, n):
+    """Refuse any change the rules forbid. n is the stored node, or None for a new node."""
+    prev = (n or {}).get('status', 'pending')
+    if a.status == 'cached': die(3, f"Refused: {a.node} cannot be marked cached, nothing records a cache hit. Run it, or skip it with --reason.")
+    if a.status not in MOVES[prev]:
+        die(3, f"Refused: {a.node} cannot go from {prev} to {a.status}. Allowed next: {', '.join(MOVES[prev]) or 'none'}.")
+    if a.status == 'skipped' and not (a.reason or (n or {}).get('skip_reason')):
+        die(3, f"Refused: skipping {a.node} needs a reason. Add --reason \"<why>\".")
+    old_deps = (n or {}).get('depends_on', [])
+    deps = a.depends_on if a.depends_on is not None else old_deps
+    if n is not None and deps != old_deps and not (prev == 'pending' and d.get('status') == 'planning'):
+        die(3, f"Refused: dependencies of {a.node} are locked once the run starts. Plan them before the first node runs.")
+    if n is not None and prev != 'pending' and a.check is not None and a.check != n.get('check'):
+        die(3, f"Refused: the check of {a.node} is locked once the node starts. Set it while the node is pending.")
+    if a.status != 'pending':
+        waiting = unmet(d, {'depends_on': deps})
+        if waiting: die(3, f"Refused: {a.node} cannot move to {a.status}, waiting on {', '.join(waiting)}. Finish those nodes first.")
+    if a.status in ('running', 'retrying') and prev in ('pending', 'failed'):
+        limit = d.get('max_retries', 2) + 1
+        if (n or {}).get('attempts', 0) >= limit:
+            die(3, f"Refused: {a.node} used all {limit} attempts (max retries {limit - 1}). Mark it failed and stop, or ask the user.")
+    return deps
 
 def cmd_node(a):
     if a.status not in STATUSES: die(2, f"Invalid status '{a.status}'. Use one of: {', '.join(STATUSES)}.")
@@ -113,7 +154,8 @@ def cmd_node(a):
     if bad: die(2, f"Bad plan field: {bad[0]}.")
     _, d0 = load(a.run)
     n0 = get_node(d0, a.node)
-    cmd = a.check if a.check is not None else (n0 or {}).get('check')
+    guard(a, d0, n0)
+    cmd = (n0 or {}).get('check')
     result = run_check(cmd, a.check_timeout) if a.status == 'complete' and cmd else None
     with run_lock(a.run):
         apply_node(a, result)
@@ -122,22 +164,15 @@ def apply_node(a, result):
     p, d = load(a.run)
     n = get_node(d, a.node)
     created = n is None
+    deps = guard(a, d, n)
     if created:
         n = {'id': a.node, 'role': a.role, 'status': 'pending', 'depends_on': [],
              'model': a.model, 'attempts': 0, 'files': [], 'created_at': now(),
              'started_epoch': None, 'ended_epoch': None}
     previous = None if created else n.get('status')
-    deps = a.depends_on if a.depends_on is not None else n.get('depends_on', [])
-    if a.status in ('running', 'retrying'):
-        waiting = unmet(d, {'depends_on': deps})
-        if waiting: die(3, f"Refused: {a.node} cannot start, waiting on {', '.join(waiting)}. Finish those nodes first.")
-        if previous not in ('running', 'retrying'):
-            limit = d.get('max_retries', 2) + 1
-            if n.get('attempts', 0) >= limit:
-                die(3, f"Refused: {a.node} used all {limit} attempts (max retries {limit - 1}). Mark it failed and stop, or ask the user.")
     if created: d['nodes'].append(n)
     n.update({k: v for k, v in {'role': a.role, 'status': a.status, 'model': a.model, 'check': a.check,
-                                'target': a.target, 'risk': a.risk, 'goal': a.goal}.items() if v is not None})
+                                'target': a.target, 'risk': a.risk, 'goal': a.goal, 'skip_reason': a.reason}.items() if v is not None})
     n['depends_on'] = deps
     if a.files: n['files'] = sorted(set(n.get('files', []) + a.files))
     if a.status in ('running', 'retrying') and previous not in ('running', 'retrying'):
@@ -310,9 +345,16 @@ def build_summary(d):
     nodes=d.get('nodes',[]); status=d.get('status','unknown')
     failed=[n for n in nodes if n.get('status')=='failed']
     open_=[n for n in nodes if n.get('status') not in DONE and n.get('status')!='failed']
-    q=d.get('quality',[]); lastq=[x for x in q if x.get('batch')==q[-1].get('batch')] if q else []
-    badq=[x for x in lastq if x.get('status') in ('failed','timeout')]
-    said={'complete':'The run is complete. All nodes are done and the checks passed.',
+    q=d.get('quality',[]); latest={x['command']:x for x in q}
+    badq=[x for x in latest.values() if x.get('required') and x.get('status') in ('failed','timeout')]
+    skipped=[n['id'] for n in nodes if n.get('status') in ('skipped','cached')]
+    nocheck=[n['id'] for n in nodes if n.get('status') in ('complete',) and n.get('check_exit') is None]
+    ran=[n for n in nodes if n.get('check_exit') is not None]+[x for x in q if x.get('status') in ('passed','no-tests')]
+    done_text='The run is complete. All nodes are done.'
+    if skipped: done_text+=f" Skipped or cached: {', '.join(skipped)}."
+    if nocheck: done_text+=f" No check ran for: {', '.join(nocheck)}."
+    done_text+=' The checks that ran passed.' if ran else ' No check ran.'
+    said={'complete':done_text,
           'complete-unverified':'The run is done, but no check proved the work. Treat it as unverified.',
           'failed':'The run failed.'}.get(status,f'The run is not finished. Status is {status}.')
     if status=='complete' and (failed or open_ or badq): said='The run says complete, but the state shows open problems. Do not trust it.'
@@ -418,6 +460,7 @@ def cmd_render(a):
     p,d=load(a.run); render_files(p,d); print(p.parent/'graph.html')
 
 def detect_quality_commands():
+    """Detected commands as shell strings."""
     candidates=[]
     if Path('package.json').exists():
         try:
@@ -427,35 +470,36 @@ def detect_quality_commands():
         except Exception: pass
     tests_dir=Path('tests')
     pats=('test_*.py','*_test.py')
-    has_py_tests=any(tests_dir.rglob(g) for g in pats) if tests_dir.is_dir() else False
+    has_py_tests=any(next(tests_dir.rglob(g),None) for g in pats) if tests_dir.is_dir() else False
     has_py_tests=has_py_tests or any(any(Path('.').glob(g)) for g in pats) or (tests_dir/'conftest.py').exists()
     if has_py_tests:
         with contextlib.suppress(OSError):
             if subprocess.run([sys.executable,'-c','import pytest'],capture_output=True).returncode==0: candidates.append([sys.executable,'-m','pytest','-q'])
     if Path('Cargo.toml').exists(): candidates.append(['cargo','test','--quiet'])
     if Path('go.mod').exists(): candidates.append(['go','test','./...'])
-    return candidates
+    join=subprocess.list2cmdline if os.name=='nt' else shlex.join
+    return [join(c) for c in candidates]
+
+def latest_required(d):
+    """Latest record of each required quality command, in first-seen order."""
+    need=list(d.get('quality_commands',[])); need+=[x['command'] for x in d.get('quality',[]) if x.get('required') and x['command'] not in need]
+    return {c:next((x for x in reversed(d.get('quality',[])) if x.get('command')==c),None) for c in need}
 
 def cmd_quality(a):
-    load(a.run)
-    commands=[shlex.split(c, posix=(os.name!='nt')) for c in a.command] if a.command else detect_quality_commands()
+    _,d0=load(a.run)
+    if a.command: commands=[(c,False) for c in a.command]
+    else:
+        commands=[(c,True) for c in dict.fromkeys(d0.get('quality_commands',[])+detect_quality_commands())]
     records=[];failed=False
-    for argv in commands:
-        command=' '.join(argv); started=epoch()
-        exe=shutil.which(argv[0]) if argv else None
-        if not exe:
-            failed=True; record={'at':now(),'command':command,'status':'failed','exit_code':None,'duration_ms':0,'stdout':'','stderr':f'command not found: {argv[0] if argv else ""}'}
-        else:
-            try:
-                r=subprocess.run([exe]+argv[1:],text=True,capture_output=True,timeout=a.timeout,encoding='utf-8',errors='replace')
-                is_pytest=argv[1:3]==['-m','pytest']
-                status='passed' if r.returncode==0 else 'no-tests' if (is_pytest and r.returncode==5) else 'failed'
-                failed |= status=='failed'
-                record={'at':now(),'command':command,'status':status,'exit_code':r.returncode,'duration_ms':round((epoch()-started)*1000),'stdout':r.stdout[-8000:],'stderr':r.stderr[-8000:]}
-            except subprocess.TimeoutExpired as e:
-                failed=True; record={'at':now(),'command':command,'status':'timeout','exit_code':None,'duration_ms':round((epoch()-started)*1000),'stdout':str(e.stdout or '')[-8000:],'stderr':str(e.stderr or '')[-8000:]}
+    for command,required in commands:
+        started=epoch()
+        code,out,err,timed_out=run_proc(command,a.timeout,shell=True)
+        is_pytest=' -m pytest' in command
+        status='timeout' if timed_out else 'passed' if code==0 else 'no-tests' if (is_pytest and code==5) else 'failed'
+        failed |= status in ('failed','timeout')
+        record={'at':now(),'command':command,'status':status,'exit_code':code,'required':required,'duration_ms':round((epoch()-started)*1000),'stdout':out[-8000:],'stderr':err[-8000:]}
         records.append(record)
-        print(f"{record['status'].upper()}: {command}")
+        print(f"{record['status'].upper()}: {command}" + ('' if required else ' (extra: does not satisfy the finish gate)'))
     with run_lock(a.run):
         p,d=load(a.run)
         batch=max((q.get('batch',0) for q in d.get('quality',[])),default=0)+1
@@ -497,7 +541,7 @@ def cmd_export_workflow(a):
         die(3, f'Refused: plan for {a.run} is not valid. Fix it until "validate {a.run}" passes, then export.')
     levels = node_levels(d); by = {}
     for n in nodes: by.setdefault(levels[n['id']], []).append(n)
-    g = f'python3 "{Path(__file__).resolve().as_posix()}"'
+    g = f'"{Path(sys.executable or "python3").as_posix()}" "{Path(__file__).resolve().as_posix()}"'
     def mark(n, status): return f"{g} node {shlex.quote(a.run)} {shlex.quote(n['id'])} --role {shlex.quote(n.get('role') or 'worker')} --status {status}"
     def prompt(n):
         lines = [f"You are one node of a graph run. Node: {n['id']}. Goal: {n.get('goal') or n.get('role') or n['id']}."]
@@ -510,7 +554,7 @@ def cmd_export_workflow(a):
                   'Reply with ok true only if the complete command succeeded, else ok false with a short summary.']
         return '\n'.join(lines)
     title = lambda i: f'Level {i + 1}'
-    phases = ',\n'.join(f'    {js(title(i))}' for i in range(len(by)))
+    phases = ',\n'.join(f'    {{ title: {js(title(i))}, detail: {js(", ".join(n["id"] for n in by[k]))} }}' for i, k in enumerate(sorted(by)))
     out = ['export const meta = {', f'  name: {js("graph-" + a.run)},',
            f'  description: {js("Graph run " + a.run + ": " + str(d.get("task", ""))[:120])},',
            '  phases: [', phases, '  ],', '}', '',
@@ -562,13 +606,13 @@ def cmd_finish(a):
     if status=='complete':
         open_nodes=[n['id'] for n in d.get('nodes',[]) if n.get('status') not in DONE]
         if open_nodes: die(3,f"Refused: cannot finish as complete, nodes not done: {', '.join(open_nodes)}. Finish them, or use --status failed.")
-        q=d.get('quality',[])
-        if q:
-            last=[x for x in q if x.get('batch')==q[-1].get('batch')]
-            bad=[x['command'] for x in last if x.get('status') in ('failed','timeout')]
-            if bad: die(3,f"Refused: latest quality run failed ({'; '.join(bad)}). Fix it and run quality again, or use --status failed.")
-        else:
-            status='complete-unverified'; print('No quality checks were detected: run recorded as complete-unverified.')
+        req=latest_required(d)
+        missing=[c for c,x in req.items() if x is None]
+        bad=[c for c,x in req.items() if x and x.get('status') in ('failed','timeout')]
+        if missing: die(3,f"Refused: required quality command never ran ({'; '.join(missing)}). Run quality, or use --status failed.")
+        if bad: die(3,f"Refused: latest result of a required quality command failed ({'; '.join(bad)}). Fix it and run quality again, or use --status failed.")
+        if not any(x.get('status')=='passed' for x in req.values()):
+            status='complete-unverified'; print('No required quality check passed: run recorded as complete-unverified.')
     d['status']=status; d['finished_at']=now(); d['updated_at']=now()
     d['verify_steps']=verify_plans(d)
     d['access_gaps']=[f"Node {i} could not be fully verified: {a} is missing. Workaround: {c}." for i,st in d['verify_steps'].items() for a,b,c in st if b!='ok']
@@ -586,6 +630,7 @@ def cmd_status(a):
     _,d=load(a.run); print(json.dumps({'run':d,'stats':stats(d)},indent=2))
 
 def cmd_preflight(a):
+    ensure_ignore()
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     try:
         import preflight
@@ -596,8 +641,8 @@ def cmd_preflight(a):
 
 def main():
     ap=argparse.ArgumentParser();sp=ap.add_subparsers(required=True)
-    x=sp.add_parser('init');x.add_argument('task');x.add_argument('--id');x.add_argument('--host');x.add_argument('--max-retries',type=int,default=2);x.set_defaults(fn=cmd_init)
-    x=sp.add_parser('node');x.add_argument('run');x.add_argument('node');x.add_argument('--role',required=True);x.add_argument('--status',required=True);x.add_argument('--depends-on',nargs='*');x.add_argument('--model');x.add_argument('--files',nargs='*');x.add_argument('--check');x.add_argument('--target');x.add_argument('--risk');x.add_argument('--goal');x.add_argument('--check-timeout',type=int,default=300);x.set_defaults(fn=cmd_node,nolock=True)
+    x=sp.add_parser('init');x.add_argument('task');x.add_argument('--id');x.add_argument('--host');x.add_argument('--max-retries',type=int,default=2);x.add_argument('--quality-command',action='append');x.set_defaults(fn=cmd_init)
+    x=sp.add_parser('node');x.add_argument('run');x.add_argument('node');x.add_argument('--role',required=True);x.add_argument('--status',required=True);x.add_argument('--depends-on',nargs='*');x.add_argument('--model');x.add_argument('--files',nargs='*');x.add_argument('--check');x.add_argument('--target');x.add_argument('--risk');x.add_argument('--goal');x.add_argument('--reason');x.add_argument('--check-timeout',type=int,default=300);x.set_defaults(fn=cmd_node,nolock=True)
     x=sp.add_parser('brief');x.add_argument('run');x.add_argument('node');x.set_defaults(fn=cmd_brief,nolock=True)
     x=sp.add_parser('verify-plan');x.add_argument('run');x.add_argument('node');x.set_defaults(fn=cmd_verify_plan,nolock=True)
     x=sp.add_parser('next');x.add_argument('run');x.set_defaults(fn=cmd_next,nolock=True)
@@ -617,6 +662,7 @@ def main():
     try: sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception: pass
     run_id=getattr(a,'run',None)
+    if run_id: check_run_id(run_id)
     if run_id and not getattr(a,'nolock',False) and (ROOT/run_id).exists():
         with run_lock(run_id): a.fn(a)
     else: a.fn(a)
