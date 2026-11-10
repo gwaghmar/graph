@@ -305,13 +305,18 @@ def summary(r):
     if len(needs) > 2: needs = [needs[0], ' ; '.join(needs[1:])]
     return '\n'.join(lines + needs)
 
-def run_preflight(needs, refresh=False, with_accounts=False, as_json=False):
+def run_preflight(needs, refresh=False, with_accounts=False, as_json=False, info=None):
     """Return the text to print. Raise ValueError for an unknown need."""
     jobs = load_jobs()
     bad = [n for n in needs if n not in jobs]
     if bad: raise ValueError(f"Unknown need: {', '.join(bad)}. Known needs: {', '.join(sorted(jobs))}.")
     r = scan(Path.cwd(), Path.home(), os.environ, refresh, with_accounts)
     if needs: r['needs'] = resolve(jobs, needs, r)
+    if info is not None:  # names and statuses only, for the run log
+        info['needs'] = {k: {'tool': d['use'], 'note': d.get('note', '')} for k, d in r.get('needs', {}).items()}
+        info['workarounds'] = {k: d['workaround'] for k, d in r.get('needs', {}).items() if not d['use']}
+        info['access'] = dict(r['access'])
+        if with_accounts: info['accounts'] = dict(r.get('accounts', {}))
     if as_json:  # full memory path only here, never in the summary or the cache
         slug = re.sub(r'[^A-Za-z0-9]', '-', str(Path.cwd()))
         for c in r['context']:

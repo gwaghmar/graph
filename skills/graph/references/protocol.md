@@ -13,7 +13,11 @@
 - `event <run> <type> <message>` appends a note to the run log.
 - `render <run>` rewrites the run report files.
 - `finish <run> --status complete|failed`, `summary`, `tree`, `status`, `resume`.
-- `preflight --needs a,b [--refresh] [--json]` scans the environment.
+- `preflight --needs a,b [--refresh] [--json] [--run <id>]` scans the environment. With `--run` it also writes the needs, chosen tools and workarounds to the run log (no account names unless `--with-accounts`).
+- `log <run> [--refusals] [--node X] [--json]` prints the run log as a timeline.
+
+## Run log
+Every command call on an existing run appends one line to `.graph/runs/<id>/log.jsonl`: time, command, node, main args, outcome (`ok`, `refused` exit 3, `invalid` exit 2, `error`), exit code, the refusal text, and for checks the command, exit code, duration and timeout. Refused calls are logged too. Calls with an unknown run id are not logged. Env values are never logged. The log is not tamper-proof: it is a plain file the agent could edit.
 
 ## Statuses
 pending, running, retrying, complete, cached, failed, skipped.

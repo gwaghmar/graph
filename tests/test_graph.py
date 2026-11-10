@@ -394,3 +394,84 @@ class ExportWorkflow(GraphCase):
         self.node('b', 'pending')
         self.g('export-workflow', 'r1')
         self.assertTrue((Path(self.dir) / '.claude/workflows/graph-r1.js').exists())
+
+
+class RunLog(GraphCase):
+    def log(self, run='r1'):
+        p = Path(self.dir) / '.graph/runs' / run / 'log.jsonl'
+        return [json.loads(x) for x in p.read_text(encoding='utf-8').splitlines()]
+
+    def test_refused_move_logged(self):
+        self.init()
+        self.node('a', 'complete', code=3)
+        e = self.log()[-1]
+        self.assertEqual((e['cmd'], e['node'], e['outcome'], e['exit_code']), ('node', 'a', 'refused', 3))
+        self.assertIn('Refused', e['message'])
+        self.assertEqual(e['args']['status'], 'complete')
+
+    def test_invalid_status_logged(self):
+        self.init()
+        self.node('a', 'bogus', code=2)
+        e = self.log()[-1]
+        self.assertEqual((e['outcome'], e['exit_code']), ('invalid', 2))
+
+    def test_unknown_run_creates_nothing(self):
+        self.g('next', 'nope', code=2)
+        self.g('node', 'nope', 'a', '--role', 'w', '--status', 'running', code=2)
+        self.assertFalse((Path(self.dir) / '.graph/runs/nope').exists())
+
+    def test_check_logged(self):
+        self.init()
+        self.node('a', 'running', '--check', f'"{sys.executable}" -c "import sys; sys.exit(4)"')
+        self.node('a', 'complete', code=3)
+        e = self.log()[-1]
+        self.assertEqual(e['outcome'], 'refused')
+        c = e['checks'][0]
+        self.assertEqual(c['exit_code'], 4)
+        self.assertFalse(c['timed_out'])
+        self.assertIsInstance(c['duration_ms'], int)
+
+    def test_quality_logged(self):
+        self.init()
+        self.quality(f'"{sys.executable}" -c "pass"', 0)
+        e = self.log()[-1]
+        self.assertEqual(e['cmd'], 'quality')
+        self.assertEqual(e['checks'][0]['exit_code'], 0)
+
+    def test_parallel_appends_valid(self):
+        self.init()
+        procs = [subprocess.Popen([sys.executable, GRAPH, 'node', 'r1', f'n{i}', '--role', 'w', '--status', 'pending'],
+                                  cwd=self.dir, stdout=subprocess.DEVNULL) for i in range(8)]
+        for p in procs: self.assertEqual(p.wait(), 0)
+        lines = [e for e in self.log() if e['cmd'] == 'node']
+        self.assertEqual(len(lines), 8)
+
+    def test_log_command_filters(self):
+        self.init()
+        self.node('a', 'pending')
+        self.node('a', 'complete', code=3)
+        out = self.g('log', 'r1', '--refusals').stdout
+        self.assertIn('REFUSED', out)
+        self.assertNotIn('INIT', out.upper().replace('REFUSED', ''))
+        rows = json.loads(self.g('log', 'r1', '--refusals', '--json').stdout)
+        self.assertTrue(rows and all(r['outcome'] in ('refused', 'invalid') for r in rows))
+        self.assertIn('a', self.g('log', 'r1', '--node', 'a').stdout)
+
+    def test_report_and_summary(self):
+        self.init()
+        self.node('a', 'complete', code=3)
+        html = (Path(self.dir) / '.graph/runs/r1/graph.html').read_text(encoding='utf-8')
+        self.assertIn('<h2>Activity</h2>', html)
+        self.assertIn('Rule refusals: 1', html)
+        self.assertIn('class="bad"', html)
+        self.g('node', 'r1', 'a', '--role', 'w', '--status', 'skipped', '--reason', 'x')
+        self.g('finish', 'r1', '--status', 'failed')
+        s = (Path(self.dir) / '.graph/runs/r1/summary.md').read_text(encoding='utf-8')
+        self.assertIn('The rules refused 1 action(s) on node(s): a.', s)
+
+    def test_preflight_run_logged(self):
+        self.init()
+        self.g('preflight', '--run', 'r1', '--needs', 'github')
+        e = self.log()[-1]
+        self.assertEqual(e['cmd'], 'preflight')
+        self.assertIn('github', e['preflight']['needs'])

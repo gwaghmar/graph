@@ -21,7 +21,7 @@ Below, `G` means that command.
 ## Protocol
 
 1. Size the task. One-line or trivial tasks skip the graph. Just do them.
-2. Run `G preflight --needs <comma list>` for what the task needs (for example `github,deploy`; the known needs are listed in `scripts/jobs.json`). Read the summary it prints.
+2. Run `G preflight --needs <comma list>` (add `--run <id>` once the run exists, to record it in the run log) for what the task needs (for example `github,deploy`; the known needs are listed in `scripts/jobs.json`). Read the summary it prints.
 3. Use the context files your host already loaded. Do not read them again. On Claude Code, CLAUDE.md is already in context. In Cursor, read rules with `alwaysApply: true`. Ask the user at most 3 questions, in one message, and only what preflight and those files cannot answer.
 4. Write the plan. Run `G init "<task>" --host <host>`. It prints a run id. Add each node with `G node <run> <id> --role <role> --status pending --depends-on <ids>`. Then run `G validate <run>`. Fix the plan until it passes.
 5. Loop until done:
@@ -32,7 +32,7 @@ Below, `G` means that command.
    - To retry a failed node, run `G brief <run> <node>` and hand its output to a NEW subagent. Do not retry in the old context.
    - For a node with `--target web|phone|desktop|api|data` and `--risk low|high`, run `G verify-plan <run> <node>`. Do the steps it lists, cheapest first. For high risk, escalate one step after step 1 passes.
    - If the runtime refuses, read the line. Do what it says. Do not work around it.
-6. Name required quality commands at init with `--quality-command "<cmd>"` (repeatable). Run `G quality <run>`. Commands passed with `--command` are extras: they do not satisfy the finish gate. Fix failures. Then run `G finish <run> --status complete`. If you cannot finish, use `--status failed`.
+6. Name required quality commands at init with `--quality-command "<cmd>"` (repeatable). Run `G quality <run>`. Commands passed with `--command` are extras: they do not satisfy the finish gate. Fix failures. Every command, including refused ones, is logged to `.graph/runs/<id>/log.jsonl`. Read it with `G log <run> [--refusals]`. Then run `G finish <run> --status complete`. If you cannot finish, use `--status failed`.
 
 On Claude Code with the Workflow tool, prefer `G export-workflow <run>` after `validate`. It writes `.claude/workflows/graph-<run>.js`, one agent per node, run level by level. Each agent calls `G node` itself, so the gates still apply. Run that script with the Workflow tool instead of steps 5 and 6.
 

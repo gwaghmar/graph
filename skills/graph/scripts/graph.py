@@ -12,7 +12,11 @@ STATUSES = ('pending', 'running', 'retrying', 'complete', 'failed', 'skipped', '
 DONE = ('complete', 'cached', 'skipped')
 RUN_ID = re.compile(r'^[A-Za-z0-9_-]+$')
 
+# What the current command did, collected for the run log (see write_log).
+CTX = {'msg': None, 'checks': [], 'run': None, 'preflight': None}
+
 def die(code, msg):
+    CTX['msg'] = msg
     print(msg, file=sys.stderr); raise SystemExit(code)
 
 
@@ -79,7 +83,7 @@ def descendants(d, roots):
 def cmd_init(a):
     if a.max_retries < 0: die(2, '--max-retries must be 0 or more.')
     rid = a.id or uuid.uuid4().hex[:10]
-    check_run_id(rid)
+    check_run_id(rid); CTX['run'] = rid
     if (ROOT / rid).exists(): die(3, f'Refused: run {rid} already exists. Pick a new --id, or continue it with "resume".')
     ensure_ignore()
     p = ROOT / rid / 'state.json'
@@ -115,6 +119,7 @@ def run_check(command, timeout):
     pipes or &&, and are never built from untrusted input by this script."""
     started = epoch()
     code, out, _, timed_out = run_proc(command, timeout, shell=True, merge=True)
+    CTX['checks'].append({'command': command, 'exit_code': code, 'duration_ms': round((epoch() - started) * 1000), 'timed_out': bool(timed_out)})
     if timed_out: code, out = None, out + f'\n[check timed out after {timeout}s]'
     return {'check_exit': code, 'check_output': tail_lines(out), 'check_ms': round((epoch() - started) * 1000)}
 
@@ -360,6 +365,8 @@ def build_summary(d):
           'complete-unverified':'The run is done, but no check proved the work. Treat it as unverified.',
           'failed':'The run failed.'}.get(status,f'The run is not finished. Status is {status}.')
     if status=='complete' and (failed or open_ or badq): said='The run says complete, but the state shows open problems. Do not trust it.'
+    nref,rnodes=refusal_count(d['id']) if d.get('id') else (0,[])
+    said+=(f" The rules refused {nref} action(s)"+(f" on node(s): {', '.join(rnodes)}" if rnodes else '')+'.') if nref else ' The rules refused no action.'
     L=['# Run summary','',said,'','## What you asked','',d.get('task','') or 'No task recorded.','','## What changed','']
     if nodes:
         for n in nodes:
@@ -433,7 +440,17 @@ CSS=""":root{--bg:#fff;--fg:#1d2127;--card:#f5f6f8;--line:#d5d9df;--mute:#5d6672
 body{font-family:system-ui,sans-serif;background:var(--bg);color:var(--fg);margin:0;line-height:1.5}main{max-width:1000px;margin:auto;padding:16px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px;margin:14px 0}h1{font-size:1.4rem}h3{margin:.6em 0 .2em}small,.muted{color:var(--mute)}
 .node rect{fill:var(--card);stroke:var(--mute);stroke-width:2}.node.complete rect,.node.cached rect{stroke:var(--ok)}.node.failed rect{stroke:var(--bad)}.node.running rect,.node.retrying rect{stroke:var(--warn)}.node.skipped rect{stroke-dasharray:4}
-text{fill:var(--fg);font-size:12px}svg{width:100%;height:auto}line{stroke:var(--mute)}pre{white-space:pre-wrap;word-break:break-word;overflow-x:auto}code{word-break:break-all}.bad{color:var(--bad)}.ev.failed{border-color:var(--bad)}.ev.complete{border-color:var(--ok)}"""
+text{fill:var(--fg);font-size:12px}svg{width:100%;height:auto}line{stroke:var(--mute)}pre{white-space:pre-wrap;word-break:break-word;overflow-x:auto}code{word-break:break-all}.bad{color:var(--bad)}.ev.failed{border-color:var(--bad)}.ev.complete{border-color:var(--ok)}
+.act{border-collapse:collapse;width:100%;font-size:.85rem}.act td,.act th{border-bottom:1px solid var(--line);padding:4px 8px;text-align:left;vertical-align:top}tr.bad td{color:var(--bad);font-weight:600}"""
+
+def activity_html(run_id):
+    rows=read_log(run_id)
+    if not rows: return '<p class="muted">No activity logged yet.</p>'
+    e=html.escape; out=[]
+    for r in rows:
+        cls=' class="bad"' if r.get('outcome') in ('refused','invalid') else ''
+        out.append(f"<tr{cls}><td>{e(str(r.get('at','')))}</td><td>{e(str(r.get('node') or '-'))}</td><td>{e(describe(r))}</td><td>{e(str(r.get('outcome','')))}</td><td>{e(str(r.get('message') or ''))}</td></tr>")
+    return '<div style="overflow-x:auto"><table class="act"><tr><th>Time</th><th>Node</th><th>Action</th><th>Outcome</th><th>Why</th></tr>'+''.join(out)+'</table></div>'
 
 def render_files(p,d):
     out=p.parent; (out/'graph.mmd').write_text(mermaid(d), encoding='utf-8')
@@ -445,9 +462,10 @@ def render_files(p,d):
     ev=''.join(node_evidence(n,steps.get(n['id'])) for n in d.get('nodes',[]))
     page=f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">{refresh}<title>Graph run {html.escape(d['id'])}</title><style>{CSS}</style></head><body><main>
 <h1>Graph run {html.escape(d['id'])} <small>{html.escape(str(d.get('status','')))}</small></h1><p class="muted">Updated {html.escape(d.get('updated_at',''))}{live}</p>
-<section class="card">{md_html(build_summary(d))}</section>
+<section class="card">{md_html(build_summary(d))}<p><b>Rule refusals: {refusal_count(d['id'])[0]}</b></p></section>
 <section class="card"><h2>Diagram</h2><svg id="graph" viewBox="0 0 900 300" role="img" aria-label="Execution graph"></svg></section>
 <h2>Evidence per node</h2>{ev or '<p class="muted">No nodes yet.</p>'}
+<h2>Activity</h2>{activity_html(d['id'])}
 <script>const nodes={payload}.nodes;const svg=document.getElementById('graph'),NS='http://www.w3.org/2000/svg',L={{}};
 function lv(n,s=new Set()){{if(L[n.id]!=null)return L[n.id];if(s.has(n.id))return 0;s.add(n.id);const d=n.depends_on||[];return L[n.id]=d.length?1+Math.max(...d.map(i=>{{const x=nodes.find(y=>y.id===i);return x?lv(x,new Set(s)):0}})):0}}
 nodes.forEach(n=>lv(n));const by={{}},pos={{}};nodes.forEach(n=>(by[L[n.id]]??=[]).push(n));
@@ -456,7 +474,7 @@ if(ps.length)svg.setAttribute('viewBox',`0 0 ${{Math.max(400,...ps.map(q=>q.x+17
 function el(t,a,x){{const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);if(x!=null)e.textContent=x;return e}}
 nodes.forEach(n=>(n.depends_on||[]).forEach(d=>{{if(pos[d]&&pos[n.id])svg.appendChild(el('line',{{x1:pos[d].x+150,y1:pos[d].y+28,x2:pos[n.id].x,y2:pos[n.id].y+28,'stroke-width':2}}))}}));
 nodes.forEach(n=>{{const p=pos[n.id],g=el('g',{{class:'node '+n.status}});g.append(el('rect',{{x:p.x,y:p.y,width:150,height:56,rx:9}}),el('text',{{x:p.x+10,y:p.y+22}},n.id),el('text',{{x:p.x+10,y:p.y+42}},n.status));svg.appendChild(g)}});</script></main></body></html>"""
-    (out/'graph.html').write_text(page, encoding='utf-8')
+    tmp=out/f'graph.html.{os.getpid()}.tmp'; tmp.write_text(page, encoding='utf-8'); os.replace(tmp, out/'graph.html')
 
 def cmd_render(a):
     p,d=load(a.run); render_files(p,d); print(p.parent/'graph.html')
@@ -499,6 +517,7 @@ def cmd_quality(a):
         is_pytest=' -m pytest' in command
         status='timeout' if timed_out else 'passed' if code==0 else 'no-tests' if (is_pytest and code==5) else 'failed'
         failed |= status in ('failed','timeout')
+        CTX['checks'].append({'command':command,'exit_code':code,'duration_ms':round((epoch()-started)*1000),'timed_out':bool(timed_out)})
         record={'at':now(),'command':command,'status':status,'exit_code':code,'required':required,'duration_ms':round((epoch()-started)*1000),'stdout':out[-8000:],'stderr':err[-8000:]}
         records.append(record)
         print(f"{record['status'].upper()}: {command}" + ('' if required else ' (extra: does not satisfy the finish gate)'))
@@ -510,7 +529,7 @@ def cmd_quality(a):
         d.setdefault('quality',[]).extend(records)
         d['updated_at']=now();save(p,d);render_files(p,d)
     if not commands: print('No local quality command detected');return
-    if failed: raise SystemExit(1)
+    if failed: CTX['msg']='A quality check failed or timed out.'; raise SystemExit(1)
 
 def cmd_validate(a):
     _,d=load(a.run); nodes=d.get('nodes',[]); ids={n['id'] for n in nodes}; problems=[]
@@ -529,7 +548,7 @@ def cmd_validate(a):
         done.add(nid)
     for nid in graph: visit(nid,[])
     if problems:
-        print('\n'.join(f'✖ {x}' for x in problems)); raise SystemExit(1)
+        CTX['msg']='; '.join(problems)[:500]; print('\n'.join(f'✖ {x}' for x in problems)); raise SystemExit(1)
     print(f'✔ plan valid: {len(nodes)} nodes, all dependencies known, no cycles')
 
 def js(x): return json.dumps(x, ensure_ascii=True)
@@ -594,6 +613,7 @@ def cmd_resume(a):
         with run_lock(d['id']):
             p,d=load(d['id']); d['status']='running'; d.pop('finished_at',None)
             d['events'].append({'at':now(),'type':'resume','message':'reopened a failed run'}); d['updated_at']=now(); save(p,d); render_files(p,d)
+    CTX['run']=d['id']
     print(json.dumps({'run':d['id'],'task':d['task'],'status':d['status'],'graph':str(ROOT/d['id']/'graph.html')},indent=2))
 
 def git_info():
@@ -637,9 +657,80 @@ def cmd_preflight(a):
     try:
         import preflight
         needs=[n.strip() for n in (a.needs or '').split(',') if n.strip()]
-        print(preflight.run_preflight(needs, a.refresh, a.with_accounts, a.json))
+        info={}
+        print(preflight.run_preflight(needs, a.refresh, a.with_accounts, a.json, info))
+        CTX['preflight']=info
     except ValueError as e: die(2, str(e))
     except Exception as e: print(f'preflight scan incomplete ({type(e).__name__}). Continue without it or retry with --refresh.')
+
+# ---- run log: .graph/runs/<id>/log.jsonl, append-only, one JSON line per command call ----
+LOG_ARGS = ('status', 'depends_on', 'check', 'target', 'risk', 'reason', 'command', 'type', 'needs', 'refresh',
+            'with_accounts', 'include_dependents')
+
+def log_path(run_id): return ROOT / run_id / 'log.jsonl'
+
+def clip(v, n=500):
+    return v[:n] if isinstance(v, str) else v
+
+def append_log(run_id, entry):
+    """One line, one write call, O_APPEND: safe for parallel callers without taking the run lock."""
+    data = (json.dumps(entry, ensure_ascii=False) + '\n').encode('utf-8')
+    fd = os.open(log_path(run_id), os.O_WRONLY | os.O_APPEND | os.O_CREAT | getattr(os, 'O_BINARY', 0), 0o644)
+    try: os.write(fd, data)
+    finally: os.close(fd)
+
+def read_log(run_id):
+    out = []
+    try: text = log_path(run_id).read_text(encoding='utf-8')
+    except OSError: return out
+    for line in text.splitlines():
+        with contextlib.suppress(ValueError):
+            e = json.loads(line)
+            if isinstance(e, dict): out.append(e)
+    return out
+
+def write_log(a, code):
+    """Log one command call. Only when the run already exists: never create a run dir to log."""
+    cmd = a.fn.__name__[4:].replace('_', '-')
+    if cmd == 'log': return
+    rid = getattr(a, 'run', None) or CTX['run'] or getattr(a, 'id', None)
+    try:
+        if not rid or not RUN_ID.match(rid) or not (ROOT / rid / 'state.json').exists(): return
+        args = {k: clip(getattr(a, k)) for k in LOG_ARGS if getattr(a, k, None) not in (None, False, [])}
+        outcome = 'ok' if code == 0 else 'invalid' if code == 2 else 'refused' if code == 3 else 'error'
+        e = {'at': now(), 'cmd': cmd, 'node': getattr(a, 'node', None), 'args': args, 'outcome': outcome, 'exit_code': code}
+        if code != 0: e['message'] = clip(CTX['msg'] or f'exit {code}')
+        if CTX['checks']: e['checks'] = CTX['checks']
+        if CTX['preflight']: e['preflight'] = CTX['preflight']
+        append_log(rid, e)
+        if outcome != 'ok' or cmd not in ('render', 'status', 'tree', 'summary', 'next', 'brief', 'validate', 'retry-plan', 'verify-plan'):
+            p = ROOT / rid / 'state.json'; render_files(p, json.loads(p.read_text(encoding='utf-8')))
+    except Exception: pass
+
+def describe(e):
+    cmd, a = e.get('cmd', '?'), e.get('args') or {}
+    if cmd == 'node': what = 'node -> ' + str(a.get('status', '?')) + (f" (check {a['check']})" if a.get('check') else '')
+    elif cmd == 'preflight': what = 'preflight' + (f" needs {a['needs']}" if a.get('needs') else '')
+    else: what = cmd
+    for c in e.get('checks') or []:
+        what += f" [ran `{c.get('command')}` exit {c.get('exit_code')} in {c.get('duration_ms')}ms" + (' TIMED OUT' if c.get('timed_out') else '') + ']'
+    return what
+
+def refusal_count(run_id):
+    log = read_log(run_id); bad = [e for e in log if e.get('outcome') == 'refused']
+    return len(bad), list(dict.fromkeys(e['node'] for e in bad if e.get('node')))
+
+def cmd_log(a):
+    load(a.run)
+    rows = read_log(a.run)
+    if a.node: rows = [e for e in rows if e.get('node') == a.node]
+    if a.refusals: rows = [e for e in rows if e.get('outcome') in ('refused', 'invalid')]
+    if a.json: print(json.dumps(rows, indent=2, ensure_ascii=False)); return
+    if not rows: print('No log lines.'); return
+    for e in rows:
+        why = f" | {e['message']}" if e.get('message') else ''
+        print(f"{e.get('at','')}  {e.get('node') or '-':<12} {describe(e)}  {str(e.get('outcome','')).upper()}{why}")
+
 
 def main():
     ap=argparse.ArgumentParser();sp=ap.add_subparsers(required=True)
@@ -659,13 +750,22 @@ def main():
     x=sp.add_parser('summary');x.add_argument('run');x.set_defaults(fn=cmd_summary,nolock=True)
     x=sp.add_parser('finish');x.add_argument('run');x.add_argument('--status',default='complete',choices=['complete','failed']);x.set_defaults(fn=cmd_finish)
     x=sp.add_parser('status');x.add_argument('run');x.set_defaults(fn=cmd_status,nolock=True)
-    x=sp.add_parser('preflight');x.add_argument('--needs');x.add_argument('--refresh',action='store_true');x.add_argument('--with-accounts',action='store_true');x.add_argument('--json',action='store_true');x.set_defaults(fn=cmd_preflight,nolock=True)
+    x=sp.add_parser('log');x.add_argument('run');x.add_argument('--refusals',action='store_true');x.add_argument('--node');x.add_argument('--json',action='store_true');x.set_defaults(fn=cmd_log,nolock=True)
+    x=sp.add_parser('preflight');x.add_argument('--run');x.add_argument('--needs');x.add_argument('--refresh',action='store_true');x.add_argument('--with-accounts',action='store_true');x.add_argument('--json',action='store_true');x.set_defaults(fn=cmd_preflight,nolock=True)
     a=ap.parse_args()
     try: sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception: pass
     run_id=getattr(a,'run',None)
     if run_id: check_run_id(run_id)
-    if run_id and not getattr(a,'nolock',False) and (ROOT/run_id).exists():
-        with run_lock(run_id): a.fn(a)
-    else: a.fn(a)
+    code=0
+    try:
+        if run_id and not getattr(a,'nolock',False) and (ROOT/run_id).exists():
+            with run_lock(run_id): a.fn(a)
+        else: a.fn(a)
+    except SystemExit as e:
+        code=e.code if isinstance(e.code,int) else 0 if e.code is None else 1
+        write_log(a,code); raise
+    except Exception:
+        CTX['msg']=CTX['msg'] or 'Unexpected error in the runtime.'; write_log(a,1); raise
+    write_log(a,0)
 if __name__=='__main__':main()

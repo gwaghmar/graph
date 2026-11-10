@@ -69,7 +69,8 @@ In normal use the agent runs these for you. Type `/graph <task>` on Claude Code,
 
 | Command | What it does |
 |---|---|
-| `preflight --needs a,b [--refresh] [--with-accounts] [--json]` | Scan the environment, pick tools |
+| `preflight --needs a,b [--refresh] [--with-accounts] [--json] [--run id]` | Scan the environment, pick tools (`--run` logs it) |
+| `log <run> [--refusals] [--node X] [--json]` | Show what the run did and what the rules refused |
 | `init "<task>" [--host H] [--max-retries N]` | Start a run |
 | `node <run> <id> --role R --status S [...]` | Add or update a node, with rule checks |
 | `validate <run>` | Reject bad dependencies |
@@ -82,6 +83,10 @@ In normal use the agent runs these for you. Type `/graph <task>` on Claude Code,
 | `finish <run> --status complete\|failed` | Close the run |
 | `resume` | Continue the latest open run |
 | `status`, `tree`, `summary`, `render`, `event` | Reports and run log |
+
+## Logging
+
+Every command on a run is appended to `.graph/runs/<id>/log.jsonl`, one JSON line each: time, command, node, main arguments, outcome, exit code, and the refusal text. Refused moves are logged too, so you can see what the rules stopped. Check commands record exit code and duration. Run `graph.py log <run> --refusals` for a timeline, or open the HTML report (Activity section). The log is a plain local file, not a tamper-proof audit trail.
 
 ## Supported hosts
 
