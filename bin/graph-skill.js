@@ -4,34 +4,20 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { spawnSync } = require('child_process');
 
-const ROOT = path.resolve(__dirname, '..');
-const args = process.argv.slice(2);
-const command = args[0] || 'help';
-const cwd = process.cwd();
-
-const TARGETS = {
-  claude: ['templates/claude-code', '.claude'],
-  codex: ['templates/codex', '.codex'],
-  opencode: ['templates/opencode', '.opencode'],
-  cursor: ['templates/cursor', '.cursor'],
-  openclaw: ['templates/openclaw', '.agents/skills']
-};
-
-function copyDir(src, dest) {
-  fs.mkdirSync(dest, { recursive: true });
-  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
-    if (entry.name === '__pycache__') continue;
-    const from = path.join(src, entry.name);
-    const to = path.join(dest, entry.name);
-    if (entry.isDirectory()) copyDir(from, to);
-    else fs.copyFileSync(from, to);
-  }
-}
+const SRC = path.resolve(__dirname, '..', 'skills', 'graph');
+const OWNER_FILE = '.graph-skill-owner';
+// Text that only files written by graph-skill 0.x contain.
+const LEGACY_MARKER = /\.graph\/graph\.py|graph-skill/;
+const LEGACY_PATHS = [
+  '.claude/commands/graph.md', '.claude/agents/graph-planner.md', '.claude/agents/graph-reviewer.md',
+  '.claude/agents/graph-visualizer.md', '.claude/agents/graph-worker.md',
+  '.codex/skills/graph', '.cursor/rules/graph.mdc', '.opencode/commands/graph.md'
+];
+const MARKETPLACE_CMDS = ['claude plugin marketplace add gwaghmar/graph', 'claude plugin install graph@graph-skill'];
 
 function commandExists(name) {
-  // Test hook: GRAPH_SKILL_TEST_HOSTS="claude,codex" replaces the PATH lookup.
+  // Test hook: GRAPH_SKILL_TEST_HOSTS="claude,openclaw" replaces the PATH lookup.
   if (process.env.GRAPH_SKILL_TEST_HOSTS !== undefined) {
     return process.env.GRAPH_SKILL_TEST_HOSTS.split(',').map((x) => x.trim()).includes(name);
   }
@@ -39,140 +25,137 @@ function commandExists(name) {
   for (const dir of (process.env.PATH || '').split(path.delimiter)) {
     if (!dir) continue;
     for (const ext of exts) {
-      try {
-        const full = path.join(dir, name + ext);
-        if (fs.statSync(full).isFile()) return true;
-      } catch (e) { /* not here */ }
+      try { if (fs.statSync(path.join(dir, name + ext)).isFile()) return true; } catch (e) { /* not here */ }
     }
   }
   return false;
 }
 
-function hasAny(paths) {
-  const home = os.homedir();
-  return paths.some((p) => fs.existsSync(path.resolve(cwd, p)) || (home && fs.existsSync(path.resolve(home, p))));
+function detectHosts(cwd, home) {
+  const has = (p) => fs.existsSync(path.join(cwd, p)) || fs.existsSync(path.join(home, p));
+  const hosts = [];
+  if (has('.claude') || commandExists('claude')) hosts.push('claude');
+  if (has('.codex') || commandExists('codex')) hosts.push('codex');
+  if (has('.opencode') || commandExists('opencode')) hosts.push('opencode');
+  if (has('.cursor') || commandExists('cursor')) hosts.push('cursor');
+  if (has('.openclaw') || commandExists('openclaw')) hosts.push('openclaw');
+  return hosts;
 }
 
-function detectHosts() {
-  const env = process.env;
-  // Session env vars are set only inside a live host session — trust them alone.
-  // CODEX_HOME is excluded: it is a persistent config variable, not session-only.
-  if (env.CLAUDECODE) return ['claude'];
-  if (env.OPENCODE) return ['opencode'];
-  if ((env.TERM_PROGRAM || '').toLowerCase().includes('cursor') || env.CURSOR_TRACE_ID) return ['cursor'];
-
-  const detected = [];
-  if (hasAny(['.claude', '.claude.json']) || commandExists('claude')) detected.push('claude');
-  if (hasAny(['.codex']) || env.CODEX_HOME || commandExists('codex')) detected.push('codex');
-  if (hasAny(['.opencode']) || commandExists('opencode')) detected.push('opencode');
-  if (hasAny(['.cursor']) || commandExists('cursor')) detected.push('cursor');
-  if (hasAny(['.openclaw']) || commandExists('openclaw')) detected.push('openclaw');
-
-  return detected;
+// Skill folders for this scope. Codex, Cursor, OpenCode and OpenClaw read .agents/skills.
+function targets(base) {
+  return [path.join(base, '.claude', 'skills', 'graph'), path.join(base, '.agents', 'skills', 'graph')];
 }
 
-function resolveTarget(requested) {
-  if (requested && requested !== 'auto') {
-    if (!TARGETS[requested] && requested !== 'all') throw new Error(`Unknown target: ${requested}`);
-    return requested === 'all' ? Object.keys(TARGETS) : [requested];
+function listFiles(dir, rel = '') {
+  const out = [];
+  for (const e of fs.readdirSync(path.join(dir, rel), { withFileTypes: true })) {
+    if (e.name === '__pycache__') continue;
+    const r = path.join(rel, e.name);
+    if (e.isDirectory()) out.push(...listFiles(dir, r)); else out.push(r);
   }
+  return out;
+}
 
-  const detected = detectHosts();
-  if (detected.length === 1) return detected;
-  if (detected.length === 0) {
-    throw new Error('Could not detect Claude Code, Codex, OpenCode, Cursor, or OpenClaw. Use --target <host>.');
+function installTo(dest) {
+  if (fs.existsSync(dest) && !fs.existsSync(path.join(dest, OWNER_FILE))) {
+    console.log(`Skipped ${dest}: a folder not made by graph-skill is already there. Move it, then run install again.`);
+    return false;
   }
-  throw new Error(`Multiple hosts detected (${detected.join(', ')}). Run inside the intended host or use --target <host>.`);
-}
-
-function getFlag(name) {
-  const index = args.indexOf(name);
-  if (index >= 0) return args[index + 1];
-  const eq = args.find((a) => a.startsWith(`${name}=`));
-  return eq ? eq.slice(name.length + 1) : undefined;
-}
-
-function readHostFile() {
-  try {
-    return JSON.parse(fs.readFileSync(path.join(cwd, '.graph', 'host.json'), 'utf8'));
-  } catch {
-    return null;
+  for (const rel of listFiles(SRC)) {
+    fs.mkdirSync(path.dirname(path.join(dest, rel)), { recursive: true });
+    fs.copyFileSync(path.join(SRC, rel), path.join(dest, rel));
   }
+  fs.writeFileSync(path.join(dest, OWNER_FILE), JSON.stringify({ installedAt: new Date().toISOString() }) + '\n', 'utf8');
+  console.log(`Installed Graph -> ${dest}`);
+  return true;
 }
 
-function ensureGitignore() {
+function ensureGitignore(cwd) {
   const gi = path.join(cwd, '.gitignore');
   if (!fs.existsSync(path.join(cwd, '.git')) && !fs.existsSync(gi)) return;
   let text = '';
-  try { text = fs.readFileSync(gi, 'utf8'); } catch {}
-  if (text.split(/\r?\n/).some((line) => ['.graph', '.graph/'].includes(line.trim()))) return;
-  fs.writeFileSync(gi, text + (text && !text.endsWith('\n') ? '\n' : '') + '.graph/\n');
-  console.log('Added .graph/ to .gitignore');
+  try { text = fs.readFileSync(gi, 'utf8'); } catch (e) { /* new file */ }
+  const have = new Set(text.split(/\r?\n/).map((l) => l.trim()));
+  const add = ['.graph/runs/', '.graph/preflight.json'].filter((l) => !have.has(l));
+  if (!add.length) return;
+  fs.writeFileSync(gi, text + (text && !text.endsWith('\n') ? '\n' : '') + add.join('\n') + '\n', 'utf8');
+  console.log(`Added ${add.join(', ')} to .gitignore`);
 }
 
-function install(requested) {
-  const selected = resolveTarget(getFlag('--target') || requested || 'auto');
-  for (const name of selected) {
-    const [src, dest] = TARGETS[name];
-    copyDir(path.join(ROOT, src), path.join(cwd, dest));
-    console.log(`Installed Graph for ${name} -> ${path.join(cwd, dest)}`);
-  }
-  const existing = readHostFile();
-  const hosts = [...new Set([...(existing && existing.hosts || []), ...selected])];
-  copyDir(path.join(ROOT, 'core'), path.join(cwd, '.graph'));
-  fs.writeFileSync(path.join(cwd, '.graph', 'host.json'), JSON.stringify({ hosts, installedAt: new Date().toISOString() }, null, 2) + '\n');
-  ensureGitignore();
-  console.log(`Installed shared runtime -> ${path.join(cwd, '.graph')}`);
-}
-
-function uninstall(requested) {
-  const selected = resolveTarget(getFlag('--target') || requested || 'auto');
-  const dirs = {
-    claude: ['.claude/commands/graph.md', '.claude/agents/graph-planner.md', '.claude/agents/graph-reviewer.md', '.claude/agents/graph-worker.md', '.claude/agents/graph-visualizer.md'],
-    codex: ['.codex/skills/graph'],
-    opencode: ['.opencode/commands/graph.md'],
-    cursor: ['.cursor/rules/graph.mdc'],
-    openclaw: ['.agents/skills/graph']
-  };
-  for (const target of selected) {
-    for (const rel of dirs[target]) fs.rmSync(path.join(cwd, rel), { recursive: true, force: true });
-    console.log(`Removed Graph files for ${target}`);
-  }
-  const markers = {
-    claude: '.claude/commands/graph.md',
-    codex: '.codex/skills/graph/SKILL.md',
-    opencode: '.opencode/commands/graph.md',
-    cursor: '.cursor/rules/graph.mdc',
-    openclaw: '.agents/skills/graph/SKILL.md'
-  };
-  const existing = readHostFile();
-  // Missing/corrupt host.json (pre-0.4 installs): infer installed hosts from adapter files on disk.
-  const installed = (existing && existing.hosts) || Object.keys(markers).filter((h) => fs.existsSync(path.join(cwd, markers[h])));
-  const remaining = installed.filter((h) => !selected.includes(h));
-  if (remaining.length && fs.existsSync(path.join(cwd, '.graph'))) {
-    fs.writeFileSync(path.join(cwd, '.graph', 'host.json'), JSON.stringify({ hosts: remaining, installedAt: existing ? existing.installedAt : new Date().toISOString() }, null, 2) + '\n');
-    console.log(`Kept shared runtime .graph for remaining hosts: ${remaining.join(', ')}`);
-  } else {
-    fs.rmSync(path.join(cwd, '.graph'), { recursive: true, force: true });
-    console.log('Removed shared runtime .graph');
+function migrateLegacy(cwd) {
+  for (const rel of LEGACY_PATHS) {
+    const p = path.join(cwd, rel);
+    if (!fs.existsSync(p)) continue;
+    const file = fs.statSync(p).isDirectory() ? path.join(p, 'SKILL.md') : p;
+    let text = '';
+    try { text = fs.readFileSync(file, 'utf8'); } catch (e) { /* unreadable */ }
+    if (LEGACY_MARKER.test(text)) {
+      fs.rmSync(p, { recursive: true, force: true });
+      console.log(`Removed old 0.x file ${rel}`);
+    } else {
+      console.log(`Note: ${rel} was not made by graph-skill, so it was left in place.`);
+    }
   }
 }
 
-function detect() {
-  const detected = detectHosts();
-  console.log(JSON.stringify({ detected, cwd }, null, 2));
+function install(flags, cwd, home) {
+  const hosts = detectHosts(cwd, home);
+  const base = flags.global ? home : cwd;
+  console.log(`Hosts detected: ${hosts.length ? hosts.join(', ') : 'none (installing the standard folders anyway)'}`);
+  targets(base).forEach(installTo);
+  if (!flags.global) { ensureGitignore(cwd); migrateLegacy(cwd); }
+  console.log('\nOn Claude Code you can also install it as a plugin:');
+  MARKETPLACE_CMDS.forEach((c) => console.log(`  ${c}`));
+}
+
+function update(flags, cwd, home) {
+  const base = flags.global ? home : cwd;
+  let n = 0;
+  for (const dest of targets(base)) {
+    if (!fs.existsSync(path.join(dest, OWNER_FILE))) continue;
+    installTo(dest); n++;
+  }
+  if (!n) console.log('Nothing to update. Run "graph-skill install" first.');
+}
+
+function uninstall(flags, cwd, home) {
+  const base = flags.global ? home : cwd;
+  for (const dest of targets(base)) {
+    if (!fs.existsSync(dest)) continue;
+    if (!fs.existsSync(path.join(dest, OWNER_FILE))) { console.log(`Left ${dest}: not made by graph-skill.`); continue; }
+    fs.rmSync(dest, { recursive: true, force: true });
+    console.log(`Removed ${dest}`);
+  }
+  console.log('Run history in .graph/ was kept.');
+}
+
+function doctor(flags, cwd, home) {
+  const hosts = detectHosts(cwd, home);
+  console.log(`Hosts detected: ${hosts.length ? hosts.join(', ') : 'none'}`);
+  for (const base of [cwd, home]) {
+    for (const dest of targets(base)) {
+      console.log(`${fs.existsSync(path.join(dest, OWNER_FILE)) ? 'ok     ' : 'missing'} ${dest}`);
+    }
+  }
+  const py = ['python3', 'python', 'py'].find(commandExists);
+  console.log(py ? `ok      Python found (${py})` : 'missing Python 3: install it so the runtime can run.');
 }
 
 function help() {
-  console.log(`graph-skill\n\nUsage:\n  npx graph-skill install              # auto-detect one host\n  npx graph-skill install --target codex\n  npx graph-skill uninstall            # auto-detect one host\n  npx graph-skill detect\n\nTargets: claude, codex, opencode, cursor, openclaw, all\n`);
+  console.log('graph-skill\n\nUsage:\n  graph-skill install [--global]\n  graph-skill update [--global]\n  graph-skill uninstall [--global]\n  graph-skill doctor');
 }
 
-try {
-  if (command === 'install') install(args[1] && !args[1].startsWith('--') ? args[1] : 'auto');
-  else if (command === 'uninstall') uninstall(args[1] && !args[1].startsWith('--') ? args[1] : 'auto');
-  else if (command === 'detect') detect();
-  else help();
-} catch (err) {
+function main(argv) {
+  const command = argv[0] || 'help';
+  const flags = { global: argv.includes('--global') };
+  const cwd = process.cwd();
+  const home = os.homedir();
+  const fns = { install, update, uninstall, doctor };
+  if (fns[command]) fns[command](flags, cwd, home); else help();
+}
+
+try { main(process.argv.slice(2)); } catch (err) {
   console.error(`graph-skill: ${err.message}`);
   process.exit(1);
 }

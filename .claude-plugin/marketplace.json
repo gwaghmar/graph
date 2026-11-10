@@ -1,0 +1,14 @@
+{
+  "name": "graph-skill",
+  "owner": {
+    "name": "Govind"
+  },
+  "description": "Graph: plan gate and run recorder for coding agents.",
+  "plugins": [
+    {
+      "name": "graph",
+      "source": "./",
+      "description": "Plan gate and run recorder for multi-step coding tasks."
+    }
+  ]
+}

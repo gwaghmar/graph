@@ -1,7 +1,7 @@
 import json, os, subprocess, sys, tempfile, unittest
 from pathlib import Path
 
-GRAPH = str(Path(__file__).resolve().parent.parent / 'core' / 'graph.py')
+GRAPH = str(Path(__file__).resolve().parent.parent / 'skills' / 'graph' / 'scripts' / 'graph.py')
 
 
 class GraphCase(unittest.TestCase):

@@ -1,0 +1,8 @@
+{
+  "name": "graph",
+  "version": "1.0.0",
+  "description": "Plan gate and run recorder: runs multi-step coding tasks as a checked dependency graph.",
+  "author": { "name": "Govind" },
+  "repository": "https://github.com/gwaghmar/graph",
+  "license": "MIT"
+}

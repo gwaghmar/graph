@@ -3,7 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-CORE = Path(__file__).resolve().parent.parent / 'core'
+CORE = Path(__file__).resolve().parent.parent / 'skills' / 'graph' / 'scripts'
 sys.path.insert(0, str(CORE))
 import preflight  # noqa: E402
 

@@ -25,13 +25,12 @@
   },
   "homepage": "https://github.com/gwaghmar/graph#readme",
   "files": [
+    "skills/",
+    ".claude-plugin/",
     "bin/",
-    "core/",
-    "templates/",
-    "examples/",
-    "tests/",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "bin": {
     "graph-skill": "bin/graph-skill.js"
