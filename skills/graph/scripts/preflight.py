@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Graph preflight: scan the environment and pick the best tool for each job.
-Records names and yes/no answers only. Never reads secrets, tokens or env values."""
+Records names and yes/no answers only. It parses MCP config files but keeps only server names,
+and never stores or prints env values, tokens or other config values."""
 from __future__ import annotations
 import json, os, platform, re, shutil, subprocess, sys, time
 from concurrent.futures import ThreadPoolExecutor
@@ -71,6 +72,17 @@ def probe_cli(name):
     ver = first_line(r[1] or r[2])[:60] if r and r[0] == 0 else ''
     return {'present': True, 'version': ver or 'unknown'}
 
+def parse_account(name, out, err=''):
+    """Pull the account name from CLI output. supabase has no reliable account line, so it stores nothing."""
+    text = (out or '') + '\n' + (err or '')
+    if name == 'gh':
+        m = re.search(r'account\s+([A-Za-z0-9][A-Za-z0-9_.-]*)', text)
+        return m.group(1) if m else ''
+    if name == 'vercel':
+        lines = [l.strip() for l in (out or '').splitlines() if l.strip()]
+        return lines[-1] if lines else ''
+    return ''
+
 def probe_access(name, with_accounts):
     """Exit code only. Output is discarded unless the caller asked for account names."""
     if not shutil.which(name): return {'status': 'unknown'}
@@ -78,8 +90,8 @@ def probe_access(name, with_accounts):
     if r is None: return {'status': 'unknown'}
     d = {'status': 'ok' if r[0] == 0 else 'no'}
     if with_accounts and r[0] == 0:
-        line = first_line(r[1]) or first_line(r[2])
-        if line: d['account'] = line[:80]
+        acct = parse_account(name, r[1], r[2])
+        if acct: d['account'] = acct[:80]
     return d
 
 def v_headless():
@@ -159,10 +171,10 @@ def always_apply(p):
 def context_files(cwd, home):
     found = []
     slug = re.sub(r'[^A-Za-z0-9]', '-', str(cwd))
+    mem = home / '.claude' / 'projects' / slug / 'memory' / 'MEMORY.md'
     for label, p in (('./CLAUDE.md', cwd / 'CLAUDE.md'), ('~/.claude/CLAUDE.md', home / '.claude/CLAUDE.md'),
                      ('./AGENTS.md', cwd / 'AGENTS.md'), ('~/.codex/AGENTS.md', home / '.codex/AGENTS.md'),
-                     (f'~/.claude/projects/{slug}/memory/MEMORY.md',
-                      home / '.claude' / 'projects' / slug / 'memory' / 'MEMORY.md')):
+                     ('claude memory (MEMORY.md)', mem)):
         if p.is_file(): found.append({'path': label})
     try:
         for p in sorted((cwd / '.cursor' / 'rules').glob('*.mdc')):
@@ -300,4 +312,9 @@ def run_preflight(needs, refresh=False, with_accounts=False, as_json=False):
     if bad: raise ValueError(f"Unknown need: {', '.join(bad)}. Known needs: {', '.join(sorted(jobs))}.")
     r = scan(Path.cwd(), Path.home(), os.environ, refresh, with_accounts)
     if needs: r['needs'] = resolve(jobs, needs, r)
+    if as_json:  # full memory path only here, never in the summary or the cache
+        slug = re.sub(r'[^A-Za-z0-9]', '-', str(Path.cwd()))
+        for c in r['context']:
+            if c['path'] == 'claude memory (MEMORY.md)':
+                c['full_path'] = f'~/.claude/projects/{slug}/memory/MEMORY.md'
     return json.dumps(r, indent=2) if as_json else summary(r)

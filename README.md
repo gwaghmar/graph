@@ -7,7 +7,7 @@ A plan gate and run recorder for coding agents. You write a plan as a dependency
 
 ## What the code enforces
 
-These rules live in `graph.py`, not in a prompt. The model cannot skip them. A refusal exits with code 3 and prints one line saying why and what to do.
+These rules live in `graph.py`, not in a prompt. The model cannot skip them. A refused action exits with code 3 and prints one line saying why and what to do. Other codes: 2 is bad input, and 1 is a failed `validate` (bad plan) or failed `quality` run.
 
 - A plan with unknown, self or cyclic dependencies is rejected.
 - A node cannot start while a dependency is unfinished.
@@ -21,7 +21,7 @@ What the code does not enforce: that the host runs ready nodes in parallel, or t
 
 `graph.py preflight --needs github,deploy` scans your machine before planning. It checks which CLIs are installed (git, gh, vercel, supabase, node, docker and others), whether gh, vercel and supabase are logged in, and what you can use to verify work (headless browser, simulators). It picks the best tool for each job you name. The result is cached in `.graph/preflight.json`.
 
-It records names and yes or no answers only. It never reads tokens or env values. Account names are shown only with `--with-accounts`.
+It records names and yes or no answers only. It parses MCP config files but keeps only server names, and never stores or prints env values or tokens. Account names are shown only with `--with-accounts`.
 
 ## Install
 
@@ -44,23 +44,23 @@ It copies one skill folder to `.claude/skills/graph` and `.agents/skills/graph`.
 ## Quick example
 
 ```bash
-G="python3 .agents/skills/graph/scripts/graph.py"
-$G preflight --needs github,deploy
-$G init "Add CSV export" --host claude --id r1
-$G node r1 scaffold --role worker --status pending
-$G node r1 api --role worker --status pending --depends-on scaffold \
+G() { python3 .agents/skills/graph/scripts/graph.py "$@"; }
+G preflight --needs github,deploy
+G init "Add CSV export" --host claude --id r1
+G node r1 scaffold --role worker --status pending
+G node r1 api --role worker --status pending --depends-on scaffold \
    --check "npm test"
-$G node r1 ui --role worker --status pending --depends-on scaffold
-$G validate r1                             # rejects bad plans
-$G next r1                                 # lists ready nodes
-$G node r1 scaffold --role worker --status running
-$G node r1 scaffold --role worker --status complete
-$G node r1 api --role worker --status running
-$G node r1 api --role worker --status complete   # runs the check; refuses on failure
-$G brief r1 api                            # retry brief for a new subagent
-$G quality r1
-$G finish r1 --status complete
-$G summary r1
+G node r1 ui --role worker --status pending --depends-on scaffold
+G validate r1                             # rejects bad plans
+G next r1                                 # lists ready nodes
+G node r1 scaffold --role worker --status running
+G node r1 scaffold --role worker --status complete
+G node r1 api --role worker --status running
+G node r1 api --role worker --status complete   # runs the check; refuses on failure
+G brief r1 api                            # retry brief for a new subagent
+G quality r1
+G finish r1 --status complete
+G summary r1
 ```
 
 In normal use the agent runs these for you. Type `/graph <task>` on Claude Code, `$graph <task>` on Codex.

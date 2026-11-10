@@ -73,7 +73,8 @@ function installTo(dest) {
     fs.mkdirSync(path.dirname(path.join(dest, rel)), { recursive: true });
     fs.copyFileSync(path.join(SRC, rel), path.join(dest, rel));
   }
-  fs.writeFileSync(path.join(dest, OWNER_FILE), JSON.stringify({ installedAt: new Date().toISOString() }) + '\n', 'utf8');
+  const files = listFiles(SRC).map((r) => r.split(path.sep).join('/'));
+  fs.writeFileSync(path.join(dest, OWNER_FILE), JSON.stringify({ installedAt: new Date().toISOString(), files }) + '\n', 'utf8');
   console.log(`Installed Graph -> ${dest}`);
   return true;
 }
@@ -100,7 +101,8 @@ function migrateLegacy(cwd) {
     try { text = fs.readFileSync(file, 'utf8'); } catch (e) { /* unreadable */ }
     const sha = crypto.createHash('sha256').update(text.replace(/\r\n/g, '\n')).digest('hex');
     if (LEGACY_MARKER.test(text) || LEGACY_HASHES.has(sha)) {
-      fs.rmSync(p, { recursive: true, force: true });
+      fs.rmSync(file, { force: true }); // only the matching file, not other files in a folder
+      if (file !== p) { try { fs.rmdirSync(p); } catch (e) { /* other files remain */ } }
       console.log(`Removed old 0.x file ${rel}`);
     } else {
       console.log(`Note: ${rel} was not made by graph-skill, so it was left in place.`);
@@ -129,13 +131,33 @@ function update(flags, cwd, home) {
   if (!n) console.log('Nothing to update. Run "graph-skill install" first.');
 }
 
+// Remove only files the installer listed, then empty folders. Keep the folder if the user added files.
+function removeOwned(dest) {
+  let files;
+  try { files = JSON.parse(fs.readFileSync(path.join(dest, OWNER_FILE), 'utf8')).files; } catch (e) { /* old marker */ }
+  if (!Array.isArray(files)) files = listFiles(SRC); // older installs: the current skill file list
+  for (const rel of files) {
+    const p = path.resolve(dest, rel);
+    if (!p.startsWith(path.resolve(dest) + path.sep)) continue;
+    try { fs.unlinkSync(p); } catch (e) { /* already gone */ }
+  }
+  fs.rmSync(path.join(dest, OWNER_FILE), { force: true });
+  fs.rmSync(path.join(dest, 'scripts', '__pycache__'), { recursive: true, force: true });
+  const prune = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) if (e.isDirectory()) prune(path.join(d, e.name));
+    if (!fs.readdirSync(d).length) fs.rmdirSync(d);
+  };
+  prune(dest);
+  if (fs.existsSync(dest)) console.log(`Removed graph-skill files from ${dest}. The folder was kept because it holds other files.`);
+  else console.log(`Removed ${dest}`);
+}
+
 function uninstall(flags, cwd, home) {
   const base = flags.global ? home : cwd;
   for (const dest of targets(base)) {
     if (!fs.existsSync(dest)) continue;
     if (!fs.existsSync(path.join(dest, OWNER_FILE))) { console.log(`Left ${dest}: not made by graph-skill.`); continue; }
-    fs.rmSync(dest, { recursive: true, force: true });
-    console.log(`Removed ${dest}`);
+    removeOwned(dest);
   }
   console.log('Run history in .graph/ was kept.');
 }

@@ -19,7 +19,7 @@
 pending, running, retrying, complete, cached, failed, skipped.
 
 ## Exit codes
-0 ok. 2 bad input. 3 refused by a rule. A refusal line says why and what to do.
+0 ok. 1 `validate` found a bad plan, or `quality` failed. 2 bad input. 3 refused by a rule. A refusal line says why and what to do.
 
 ## Refusals
 - A node cannot start while its dependencies are unfinished.

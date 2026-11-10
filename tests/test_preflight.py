@@ -11,7 +11,7 @@ AUTH_WORDS = ('whoami', 'auth', 'projects')
 
 
 def fake_run(cmd, timeout, shell=False, merge=False, capture=True):
-    out = 'alice-account\n' if any(w in cmd for w in AUTH_WORDS) else 'v1.2.3\n'
+    out = 'github.com\n  Logged in to github.com account alice-account (keyring)\n' if any(w in cmd for w in AUTH_WORDS) else 'v1.2.3\n'
     return 0, out if capture else '', '', False
 
 
@@ -47,6 +47,22 @@ class PreflightCase(unittest.TestCase):
         with w, r:
             res = self.scan(with_accounts=True)
         self.assertEqual(res['accounts']['gh'], 'alice-account')
+
+    def test_parse_account_from_real_output(self):
+        gh = 'github.com\n  \u2713 Logged in to github.com account octo-cat (keyring)\n  - Active account: true\n'
+        self.assertEqual(preflight.parse_account('gh', gh), 'octo-cat')
+        self.assertEqual(preflight.parse_account('gh', '', gh), 'octo-cat')
+        self.assertEqual(preflight.parse_account('vercel', 'Vercel CLI 39\nbob\n'), 'bob')
+        self.assertEqual(preflight.parse_account('supabase', 'LINKED | ORG ID\n'), '')
+
+    def test_memory_label_is_short(self):
+        slug = preflight.re.sub(r'[^A-Za-z0-9]', '-', str(self.cwd))
+        m = self.home / '.claude' / 'projects' / slug / 'memory'
+        m.mkdir(parents=True); (m / 'MEMORY.md').write_text('x', encoding='utf-8')
+        res = self.scan()
+        self.assertEqual([c['path'] for c in res['context']], ['claude memory (MEMORY.md)'])
+        self.assertNotIn(slug, json.dumps(res))
+        self.assertNotIn(slug, (self.cwd / '.graph' / 'preflight.json').read_text(encoding='utf-8'))
 
     def test_fail_soft_when_everything_breaks(self):
         with mock.patch('preflight.shutil.which', side_effect=OSError('boom')), \

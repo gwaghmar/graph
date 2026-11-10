@@ -69,6 +69,32 @@ test('a graph folder not made by us is never overwritten or removed', () => {
   assert.equal(fs.readFileSync(path.join(own, 'SKILL.md'), 'utf8'), 'mine');
 });
 
+test('uninstall keeps user files added to an owned folder', () => {
+  const c = setup();
+  run(c, ['install']);
+  const dir = path.join(c.proj, '.claude/skills/graph');
+  fs.writeFileSync(path.join(dir, 'mine.txt'), 'keep');
+  const r = run(c, ['uninstall']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(exists(dir, 'mine.txt'));
+  assert.equal(exists(dir, 'SKILL.md'), false);
+  assert.equal(exists(dir, '.graph-skill-owner'), false);
+  assert.match(r.stdout, /kept because it holds other files/);
+  assert.equal(exists(c.proj, '.agents/skills/graph'), false);
+});
+
+test('legacy migration removes only SKILL.md and keeps other files in the folder', () => {
+  const c = setup();
+  const fx = fs.readFileSync(path.join(__dirname, 'fixtures-legacy', 'openclaw-SKILL.md'), 'utf8');
+  const dir = path.join(c.proj, '.codex/skills/graph');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'SKILL.md'), fx);
+  fs.writeFileSync(path.join(dir, 'notes.txt'), 'keep');
+  run(c, ['install']);
+  assert.equal(exists(dir, 'SKILL.md'), false);
+  assert.ok(exists(dir, 'notes.txt'));
+});
+
 test('update re-copies owned files and keeps user extras', () => {
   const c = setup();
   run(c, ['install']);
