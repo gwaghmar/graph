@@ -1,7 +1,12 @@
 # Graph protocol detail
 
 ## Commands
-- `init "<task>" [--host H] [--max-retries N] [--skip-preflight "<reason>"]` creates a run and prints its id. `--skip-preflight` records why preflight is not needed (logged).
+- `init "<task>" [--host H] [--max-retries N] [--skip-preflight "<reason>"] [--skip-context "<reason>"] [--auto-approve "<user words>"]` creates a run, stores today's date (UTC) as `run_date`, and prints its id. `--skip-preflight` and `--skip-context` record why a step is not needed. `--auto-approve` records the user's words that allow going ahead without review. All are logged.
+- `context --run <id>` prints "Today is YYYY-MM-DD.", then the user's context files in priority order (global: `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, `~/.cursor/rules`; project: `CLAUDE.md`, `AGENTS.md`, `.cursor/rules/*.mdc` with alwaysApply; then the Claude memory index and each note it links) with last-modified date and age in days. A note older than 30 days is marked STALE. It prints "Stale: N notes". It reads only the frontmatter of memory notes (`metadata.modified`, else file date). It never prints file bodies, and home paths show as `~`. The stale names are stored in the run state.
+- `profile --run <id> --text "<note>"` stores the "how this user works" note. Refused (exit 2) above 10 lines or 1200 characters.
+- `tools --run <id> --task "<text>"` ranks enabled skills and plugins by word overlap between the task and name plus description (no AI), prints the top 8, the CLI and MCP pick per need from `jobs.json`, and lists strong matches that are turned off.
+- `choose --run <id> [--skills a,b] [--plugins p] [--clis gh,vercel] [--mcp x] --why "<one line>"` records the toolkit. Names not found on this machine are allowed and flagged. Names that are turned off are flagged.
+- `approve --run <id> --note "<what the user said>"` records approval with the user's words.
 - `node <run> <id> --role R --status S [--depends-on ...] [--files ...] [--goal G] [--check CMD] [--target T] [--risk R] [--check-timeout S]` records a node.
 - `brief <run> <node>` prints a fresh-context retry brief: goal, check, failing output tail, git diff --stat, attempt n of max.
 - `verify-plan <run> <node>` prints the verification steps this machine supports for the node target, cheapest first.
@@ -19,6 +24,15 @@
 ## Run log
 Every command call on an existing run appends one line to `.graph/runs/<id>/log.jsonl`: time, command, node, main args, outcome (`ok`, `refused` exit 3, `invalid` exit 2, `error`), exit code, the refusal text, and for checks the command, exit code, duration and timeout. Refused calls are logged too. Calls with an unknown run id are not logged. Env values are never logged. The log is not tamper-proof: it is a plain file the agent could edit.
 
+## Start order
+1 size the task, 2 read the user (`context`, `profile`), 3 preflight and pick tools (`tools`, `choose`), 4 work with the user on ideas, 5 plan, 6 show the plan and get approval (`approve`), 7 run, 8 finish. The runtime cannot prove an approval came from a human. It records the text it is given.
+
+## Freshness
+`init` stores `run_date`. `summary.md` and the report show "Run date", "Stale context flagged: N (names)", the toolkit and the approval text. Rules for the agent: STALE notes are hints to verify; the newer and more specific rule wins when two conflict; check current docs (Context7, web, or `--help`) before using a library, flag, API or model name, and record the source.
+
+## Skill discovery
+Preflight lists skills with name and a description cut to 200 chars (frontmatter only) from `.claude/skills`, `~/.claude/skills`, `.agents/skills`, `~/.agents/skills`, `~/.codex/skills`, and the skill folders of plugins in `~/.claude/settings.json` `enabledPlugins` (found through `~/.claude/plugins/installed_plugins.json`, else `~/.claude/plugins/cache/<market>/<plugin>/<version>`; only folders under `~/.claude/plugins` are read). A skill is OFF when `skillOverrides` sets it to `off`; a plugin and its skills are OFF when `enabledPlugins` is false.
+
 ## Statuses
 pending, running, retrying, complete, cached, failed, skipped.
 
@@ -26,7 +40,7 @@ pending, running, retrying, complete, cached, failed, skipped.
 0 ok. 1 `validate` found a bad plan, or `quality` failed. 2 bad input. 3 refused by a rule. A refusal line says why and what to do.
 
 ## Refusals
-- A node cannot start until `preflight --run <id>` is logged for the run, or the run was created with `--skip-preflight`.
+- A node cannot start (move to running or retrying) until all of these are recorded, and the refusal (exit 3) lists exactly which are missing, with the commands: preflight logged (or `--skip-preflight`); `profile` and `choose` recorded (or `--skip-context`); `approve` recorded (or `--auto-approve` at init). Runs made before schema 4 only need preflight. `export-workflow` is refused while profile, choose or approval is missing.
 - A node cannot start while its dependencies are unfinished.
 - A node cannot start after it used all its attempts.
 - A run cannot finish as complete while nodes are open or the last quality run failed.

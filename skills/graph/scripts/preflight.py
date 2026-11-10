@@ -151,13 +151,99 @@ def mcp_servers(cwd, home):
     except Exception: pass
     return sorted(names)
 
-def skill_names(cwd, home):
-    names = set()
-    for d in (cwd / '.claude/skills', home / '.claude/skills', cwd / '.agents/skills',
-              home / '.agents/skills', home / '.codex/skills'):
-        try: names.update(p.name for p in d.iterdir() if p.is_dir())
+def read_front(p, max_lines=80):
+    """Read only the frontmatter of a file. Return (top-level keys with values, raw frontmatter text).
+    Indented lines and block scalars (> or |) are joined onto their key. The body is never read."""
+    lines = []
+    try:
+        with open(p, encoding='utf-8', errors='replace') as f:
+            if f.readline().strip() != '---': return {}, ''
+            for _ in range(max_lines):
+                line = f.readline()
+                if not line or line.strip() == '---': break
+                lines.append(line.rstrip('\n'))
+    except OSError: return {}, ''
+    out, key = {}, None
+    for line in lines:
+        m = re.match(r'^([A-Za-z_][\w-]*):\s*(.*)$', line)
+        if m:
+            key = m.group(1); out[key] = '' if m.group(2).strip() in ('>', '|', '>-', '|-') else m.group(2).strip()
+        elif key and line.strip(): out[key] = (out[key] + ' ' + line.strip()).strip()
+    return {k: v.strip().strip('"\'') for k, v in out.items()}, '\n'.join(lines)
+
+DESC_MAX = 200
+OFF_WORDS = ('off', 'disabled', 'disable', 'false', 'hidden')
+
+def is_off_value(v):
+    return v is False or (isinstance(v, str) and v.strip().lower() in OFF_WORDS)
+
+def skill_item(skill_md, src, settings, plugin=None, plugin_off=False):
+    front, _ = read_front(skill_md)
+    base = front.get('name') or skill_md.parent.name
+    name = f'{plugin}:{base}' if plugin else base
+    ov = settings.get('skillOverrides') if isinstance(settings.get('skillOverrides'), dict) else {}
+    off = plugin_off or is_off_value(ov.get(name)) or is_off_value(ov.get(base))
+    return {'name': name, 'kind': 'skill', 'src': src, 'desc': ' '.join(front.get('description', '').split())[:DESC_MAX],
+            'off': bool(off), 'off_why': ('plugin is disabled' if plugin_off else 'skillOverrides') if off else ''}
+
+def plugin_dirs(home, key):
+    """Install folders of one plugin: installed_plugins.json first, else the cache layout cache/<market>/<name>/<version>.
+    Only folders under ~/.claude/plugins are used."""
+    root = (home / '.claude' / 'plugins').resolve()
+    name, _, market = key.partition('@')
+    found = []
+    entries = read_json(home / '.claude' / 'plugins' / 'installed_plugins.json').get('plugins')
+    for e in (entries.get(key) if isinstance(entries, dict) and isinstance(entries.get(key), list) else []):
+        try:
+            p = Path(e['installPath']).resolve()
+            if p.is_dir() and root in p.parents: found.append(p)
         except Exception: pass
-    return sorted(names)
+    if not found and market:
+        try: found = sorted((d for d in (root / 'cache' / market / name).iterdir() if d.is_dir()), key=lambda d: d.stat().st_mtime)[-1:]
+        except Exception: pass
+    return found
+
+def find_skill_files(base, cap=300, depth=6):
+    out = []
+    for dirpath, dirs, files in os.walk(base):
+        dirs[:] = [d for d in dirs if d not in ('node_modules', '.git')]
+        if len(Path(dirpath).relative_to(base).parts) >= depth: dirs[:] = []
+        if 'SKILL.md' in files: out.append(Path(dirpath) / 'SKILL.md')
+        if len(out) >= cap: break
+    return out
+
+def skill_catalog(cwd, home):
+    """Skills and plugins with name and a description cut to 200 chars. Never the body of any file.
+    off is true for skills in skillOverrides set to off, and for plugins (and their skills) switched off in enabledPlugins."""
+    settings = read_json(home / '.claude' / 'settings.json')
+    items, seen = [], set()
+    def add(it):
+        k = (it['kind'], it['name'], it['src'])
+        if k not in seen: seen.add(k); items.append(it)
+    for src, d in (('project', cwd / '.claude/skills'), ('user', home / '.claude/skills'), ('project-agents', cwd / '.agents/skills'),
+                   ('user-agents', home / '.agents/skills'), ('codex', home / '.codex/skills')):
+        try: subs = sorted(p for p in d.iterdir() if p.is_dir())
+        except Exception: continue
+        for p in subs:
+            if (p / 'SKILL.md').is_file(): add(skill_item(p / 'SKILL.md', src, settings))
+            else: add({'name': p.name, 'kind': 'skill', 'src': src, 'desc': '', 'off': is_off_value((settings.get('skillOverrides') or {}).get(p.name)) if isinstance(settings.get('skillOverrides'), dict) else False, 'off_why': ''})
+    enabled = settings.get('enabledPlugins') if isinstance(settings.get('enabledPlugins'), dict) else {}
+    for key in sorted(enabled):
+        name = key.partition('@')[0]; off = enabled[key] is not True
+        dirs = safe(lambda: plugin_dirs(home, key), [])
+        desc = ''
+        for d in dirs:
+            try: desc = desc or str(read_json(d / '.claude-plugin' / 'plugin.json').get('description') or '')
+            except Exception: pass
+        add({'name': name, 'kind': 'plugin', 'src': key.partition('@')[2] or 'plugin', 'desc': ' '.join(desc.split())[:DESC_MAX],
+             'off': off, 'off_why': 'enabledPlugins is false' if off else ''})
+        for d in dirs:
+            for f in find_skill_files(d):
+                add(skill_item(f, 'plugin ' + name, settings, plugin=name, plugin_off=off))
+    return items
+
+def skill_names(cwd, home):
+    return sorted({it['name'] for it in skill_catalog(cwd, home) if it['kind'] == 'skill' and not it['off']})
 
 def always_apply(p):
     """Read only the frontmatter of a Cursor rule."""
@@ -229,6 +315,7 @@ def scan(cwd, home, env, refresh=False, with_accounts=False):
                                              indent=2) + '\n', encoding='utf-8')
         except Exception: pass
     result = {k: v for k, v in tools.items() if k != 'at'}
+    result['catalog'] = safe(lambda: skill_catalog(cwd, home), [])  # fresh each call: OFF switches change often
     result['access'] = acc['status']
     if with_accounts: result['accounts'] = acc.get('names', {})
     return result
@@ -296,7 +383,7 @@ def summary(r):
     lines = [f"env: {r['os']} {r['arch']} shell={r['shell']} host={r['host']}",
              f"CLIs: {' '.join(have) or 'none'} | missing: {' '.join(miss) or 'none'}",
              'access: ' + ', '.join(f'{k} {s}' for k, s in r['access'].items()),
-             f"MCP: {short(r['mcp'])} | skills: {len(r['skills'])} ({short(r['skills'], 5)})",
+             f"MCP: {short(r['mcp'])} | skills: {len(r['skills'])} ({short(r['skills'], 5)})" + (f", {sum(1 for c in r.get('catalog', []) if c['off'])} turned off" if any(c['off'] for c in r.get('catalog', [])) else ''),
              f"context files: {short(ctx)} (* = alwaysApply)",
              f"verify: headless-browser {v.get('headless_browser')}, ios-sim {v.get('ios_simulator')}, "
              f"android {v.get('android_emulator')}, iphone-mirroring {v.get('iphone_mirroring')}"]
@@ -322,4 +409,5 @@ def run_preflight(needs, refresh=False, with_accounts=False, as_json=False, info
         for c in r['context']:
             if c['path'] == 'claude memory (MEMORY.md)':
                 c['full_path'] = f'~/.claude/projects/{slug}/memory/MEMORY.md'
-    return json.dumps(r, indent=2) if as_json else summary(r)
+    if as_json: return json.dumps(r, indent=2)
+    return summary(r)

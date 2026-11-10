@@ -18,8 +18,9 @@ class GraphCase(unittest.TestCase):
 
     def init(self, *extra, preflight=False):
         # Most tests are about other rules: skip the preflight gate. Gate tests pass preflight=True.
+        # The context, tools and approval gates have their own tests in test_userctx.py.
         skip = [] if preflight else ['--skip-preflight', 'test']
-        self.g('init', 'task', '--id', 'r1', *skip, *extra)
+        self.g('init', 'task', '--id', 'r1', *skip, '--skip-context', 'test', '--auto-approve', 'test', *extra)
 
     def node(self, nid, status, *extra, code=0):
         return self.g('node', 'r1', nid, '--role', 'worker', '--status', status, *extra, code=code)
@@ -567,7 +568,7 @@ class Fixes(GraphCase):
         self.node('a', 'running'); self.node('a', 'complete')
 
     def test_skip_preflight_logged(self):
-        self.g('init', 't', '--id', 'r1', '--skip-preflight', 'user said no')
+        self.g('init', 't', '--id', 'r1', '--skip-preflight', 'user said no', '--skip-context', 'x', '--auto-approve', 'x')
         self.assertEqual(self.state()['skip_preflight'], 'user said no')
         log = (Path(self.dir) / '.graph/runs/r1/log.jsonl').read_text(encoding='utf-8')
         self.assertIn('user said no', log)
@@ -588,7 +589,7 @@ class Fixes(GraphCase):
         skill = Path(self.dir) / '.claude/skills/graph'
         shutil.copytree(Path(GRAPH).parent.parent, skill, ignore=shutil.ignore_patterns('__pycache__'))
         run = lambda *a: subprocess.run([sys.executable, str(skill / 'scripts/graph.py'), *a], cwd=self.dir, capture_output=True, text=True)
-        self.assertEqual(run('init', 't', '--id', 'r1', '--skip-preflight', 'x').returncode, 0)
+        self.assertEqual(run('init', 't', '--id', 'r1', '--skip-preflight', 'x', '--skip-context', 'x', '--auto-approve', 'x').returncode, 0)
         self.assertEqual(run('node', 'r1', 'a', '--role', 'w', '--status', 'pending', '--goal', 'g').returncode, 0)
         self.assertEqual(run('export-workflow', 'r1').returncode, 0)
         js = (Path(self.dir) / '.claude/workflows/graph-r1.js').read_text(encoding='utf-8')
@@ -617,7 +618,7 @@ class Fixes(GraphCase):
         self.node('a', 'running'); self.node('b', 'running'); self.node('a', 'complete'); self.node('b', 'complete')
         self.g('finish', 'r1')
         self.assertIn('nodes overlapped in time: yes', self.summary())
-        self.g('init', 't', '--id', 'r3', '--skip-preflight', 'x')
+        self.g('init', 't', '--id', 'r3', '--skip-preflight', 'x', '--skip-context', 'x', '--auto-approve', 'x')
         self.g('node', 'r3', 'a', '--role', 'w', '--status', 'pending')
         self.g('finish', 'r3', '--status', 'failed')
         s = (Path(self.dir) / '.graph/runs/r3/summary.md').read_text(encoding='utf-8')

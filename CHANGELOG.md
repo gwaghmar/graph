@@ -4,6 +4,13 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+- New start order: size, read the user, pick tools, work with the user, plan, show and approve, run, finish.
+- `context` (dated user files, stale memory notes flagged after 30 days), `profile`, `tools` (rank skills and plugins by word overlap, CLI and MCP picks), `choose`, `approve`, and `init --skip-context` / `--auto-approve`.
+- Preflight discovers skills with descriptions, including plugin skills, and marks skills and plugins that are turned off.
+- The first node start is refused until preflight, profile, choose and approval are recorded. `export-workflow` is refused without them.
+- Freshness: runs store the run date. The summary and report show the run date, stale context flagged, toolkit and approval. SKILL.md adds rules for stale notes, newer-rule-wins and checking current docs.
+
 ### Fixed (found in a real end-to-end test)
 - summary.md "What failed" is built from the full run log, with resolutions. "Checked" is claimed only for nodes whose check ran and passed.
 - Files are recorded by the runtime from git snapshots (node start vs end). `--files` stays as an extra.

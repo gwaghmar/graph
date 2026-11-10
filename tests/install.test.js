@@ -26,6 +26,7 @@ test('install copies the skill to .claude and .agents, with all hosts detected',
     assert.ok(exists(c.proj, d, 'skills/graph/SKILL.md'));
     assert.ok(exists(c.proj, d, 'skills/graph/scripts/graph.py'));
     assert.ok(exists(c.proj, d, 'skills/graph/scripts/preflight.py'));
+    assert.ok(exists(c.proj, d, 'skills/graph/scripts/userctx.py'));
   }
   assert.match(r.stdout, /claude plugin marketplace add gwaghmar\/graph/);
   assert.match(r.stdout, /claude plugin install graph@graph-skill/);

@@ -18,13 +18,28 @@ On other hosts, use the path of this skill folder plus `scripts/graph.py`.
 Run it with `python3`. On Windows use `py -3` or `python` if `python3` is missing.
 Below, `G` means that command.
 
-## Protocol
+## Start: read the user, pick tools, agree the plan
 
-1. Size the task. One-line or trivial tasks skip the graph. Just do them.
-2. Run `G preflight --needs <comma list>` for what the task needs (for example `github,deploy`; the known needs are listed in `scripts/jobs.json`). Read the summary it prints. After step 4 creates the run, run `G preflight --run <id> --needs <same list>` once. The runtime refuses to start any node (exit 3) until that is logged. If the user declined preflight, create the run with `G init "<task>" --skip-preflight "<reason>"` instead.
-3. Use the context files your host already loaded. Do not read them again. On Claude Code, CLAUDE.md is already in context. In Cursor, read rules with `alwaysApply: true`. Ask the user at most 3 questions, in one message, and only what preflight and those files cannot answer.
-4. Write the plan. Run `G init "<task>" --host <host>`. It prints a run id. Add each node with `G node <run> <id> --role <role> --status pending --depends-on <ids> --goal "<what this node must achieve>"`. Every node needs a `--goal`: `validate` and `export-workflow` refuse the plan (exit 3) if one is missing. Give each node a `--check` when a command can prove it. Then run `G validate <run>`. Fix the plan until it passes.
-5. Loop until done:
+Do these in order. The runtime refuses to start any node (exit 3) until the steps marked with a command are recorded, and it lists what is missing.
+
+1. **Size the task.** One-line or trivial tasks skip the graph. Just do them. Otherwise run `G init "<task>" --host <host>` now. It prints a run id. Use `--auto-approve "<the user's words>"` if the request already says "just do it" or similar. Use `--skip-context "<reason>"` only on a host with no user files, and `--skip-preflight "<reason>"` only if the user declined preflight.
+2. **Read the user.** Run `G context --run <id>`. It prints today's date and lists the user's global, project and memory files with their age. On Claude Code these files are already in context: do not read them again. On other hosts, read the global files, then the project files, now. Follow the rules as of today. Then run `G profile --run <id> --text "<how this user works>"`: at most 10 lines on their preferences, style, what they care about, and tools they like or avoid.
+3. **Pick tools.** Run `G preflight --run <id> --needs <comma list>` (known needs are in `scripts/jobs.json`). Run `G tools --run <id> --task "<task>"` for the best-matching skills and plugins. Do not turn on anything marked off without asking the user. Record your picks: `G choose --run <id> --skills a,b --plugins p --clis gh --mcp x --why "<one line>"`.
+4. **Work with the user.** Before planning, share 2 or 3 options or ideas and ask what they want to add or change. Invite their own ideas and build on them. Do not just execute. Ask at most 3 questions per batch. More rounds are fine if the user engages.
+5. **Plan.** Add each node: `G node <id> <node> --role <role> --status pending --depends-on <ids> --goal "<what this node must achieve>"`. Every node needs a `--goal`. Add `--check "<command>"` when a command can prove the node. Run `G validate <id>` and fix the plan until it passes.
+6. **Show and approve.** Show a short mermaid diagram of the plan (`G render` writes one), the node list, the chosen toolkit and the checks. Ask: "Go, or what would you change?" Only after the user says go, run `G approve --run <id> --note "<their words, quoted>"`. Never approve for the user. If they change the plan, edit it and show it again.
+7. **Run.** 8. **Finish.** Both are below.
+
+## Keep context fresh
+
+- A memory note marked STALE is a hint to verify, not a fact.
+- When two rules conflict, the newer and more specific one wins. Say so.
+- Before you use any library, CLI flag, API or model name, check current docs: the Context7 MCP if preflight lists it, else web search or fetch, else the tool's `--help`. Do not trust model memory.
+- Record the doc source in the node goal or with `G event <id> docs "<source>"`.
+
+## Run and finish
+
+- Loop until done:
    - Run `G next <run>`. It lists nodes that are ready.
    - Start each ready node with `G node <run> <id> --role <role> --status running`. The runtime then snapshots git, and on complete or failed it records the files that changed (add `--files` for extras). Parallel nodes may share file attributions. Without git, no files are recorded.
    - On Claude Code, when any plan level has 2 or more nodes, you MUST either run `G export-workflow <run>` and execute it with the Workflow tool, or start one subagent per ready node at the same time. Doing those nodes inline, one by one, is allowed only for plans with no level of 2 or more nodes. The summary states whether nodes really overlapped in time. Do not claim parallel work that did not happen. On other hosts, use subagents when the host has them.
@@ -33,9 +48,9 @@ Below, `G` means that command.
    - To retry a failed node, run `G brief <run> <node>` and hand its output to a NEW subagent. Do not retry in the old context.
    - For a node with `--target web|phone|desktop|api|data` and `--risk low|high`, run `G verify-plan <run> <node>`. Do the steps it lists, cheapest first. For high risk, escalate one step after step 1 passes.
    - If the runtime refuses, read the line. Do what it says. Do not work around it.
-6. Name required quality commands at init with `--quality-command "<cmd>"` (repeatable). Run `G quality <run>`. Commands passed with `--command` are extras: they do not satisfy the finish gate. Fix failures. Every command, including refused ones, is logged to `.graph/runs/<id>/log.jsonl`. Read it with `G log <run> [--refusals]`. Then run `G finish <run> --status complete`. If you cannot finish, use `--status failed`.
+- Name required quality commands at `init` (step 1) with `--quality-command "<cmd>"` (repeatable). Run `G quality <run>`. Commands passed with `--command` are extras: they do not satisfy the finish gate. Fix failures. Every command, including refused ones, is logged to `.graph/runs/<id>/log.jsonl`. Read it with `G log <run> [--refusals]`. Then run `G finish <run> --status complete`. If you cannot finish, use `--status failed`.
 
-On Claude Code with the Workflow tool, prefer `G export-workflow <run>` after `validate`. It writes `.claude/workflows/graph-<run>.js`, one agent per node, run level by level. The script belongs to that run, and it uses a project-relative script path when the skill is installed in the project. Each agent calls `G node` itself, so the gates still apply. Run that script with the Workflow tool instead of steps 5 and 6.
+On Claude Code with the Workflow tool, prefer `G export-workflow <run>` after `validate`. It writes `.claude/workflows/graph-<run>.js`, one agent per node, run level by level. The script belongs to that run, and it uses a project-relative script path when the skill is installed in the project. Each agent calls `G node` itself, so the gates still apply. Run that script with the Workflow tool instead of the loop above. The export is refused until the start steps are recorded.
 
 Show the final summary to the user (`G summary <run>`). Other commands: `G status <run>`, `G tree <run>`, `G retry-plan <run> --include-dependents`, `G render <run>`, `G event <run> <type> <message>`.
 
