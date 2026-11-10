@@ -1,0 +1,7 @@
+{
+  "github": ["cli:gh", "mcp:github", "browser"],
+  "deploy": ["cli:vercel", "cli:npx vercel", "mcp:vercel"],
+  "database": ["cli:supabase", "mcp:supabase"],
+  "phone": ["browser-emulation", "ios-simulator|android-emulator", "iphone-mirroring"],
+  "web-check": ["cli:playwright", "browser"]
+}

@@ -325,6 +325,15 @@ def cmd_summary(a):
 def cmd_status(a):
     _,d=load(a.run); print(json.dumps({'run':d,'stats':stats(d)},indent=2))
 
+def cmd_preflight(a):
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    try:
+        import preflight
+        needs=[n.strip() for n in (a.needs or '').split(',') if n.strip()]
+        print(preflight.run_preflight(needs, a.refresh, a.with_accounts, a.json))
+    except ValueError as e: die(2, str(e))
+    except Exception as e: print(f'preflight scan incomplete ({type(e).__name__}). Continue without it or retry with --refresh.')
+
 def main():
     ap=argparse.ArgumentParser();sp=ap.add_subparsers(required=True)
     x=sp.add_parser('init');x.add_argument('task');x.add_argument('--id');x.add_argument('--host');x.add_argument('--max-retries',type=int,default=2);x.set_defaults(fn=cmd_init)
@@ -340,6 +349,7 @@ def main():
     x=sp.add_parser('summary');x.add_argument('run');x.set_defaults(fn=cmd_summary,nolock=True)
     x=sp.add_parser('finish');x.add_argument('run');x.add_argument('--status',default='complete',choices=['complete','failed']);x.set_defaults(fn=cmd_finish)
     x=sp.add_parser('status');x.add_argument('run');x.set_defaults(fn=cmd_status,nolock=True)
+    x=sp.add_parser('preflight');x.add_argument('--needs');x.add_argument('--refresh',action='store_true');x.add_argument('--with-accounts',action='store_true');x.add_argument('--json',action='store_true');x.set_defaults(fn=cmd_preflight,nolock=True)
     a=ap.parse_args()
     try: sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception: pass
