@@ -264,3 +264,34 @@ class Summary(GraphCase):
         self.assertLess(h.index('Run summary'), h.index('Diagram'))
         self.assertIn('hello_out', h); self.assertIn('<details>', h)
         self.assertIn('prefers-color-scheme', h); self.assertNotIn('http://', h.replace('http://www.w3.org/2000/svg', ''))
+
+
+class ExportWorkflow(GraphCase):
+    def test_export_checks_syntax_and_levels(self):
+        import shutil
+        self.init()
+        self.node('a', 'pending')
+        self.node('b', 'pending', '--depends-on', 'a', '--check', 'echo "hi"')
+        self.node('c', 'pending', '--depends-on', 'a')
+        out = Path(self.dir) / 'wf.mjs'
+        self.g('export-workflow', 'r1', '--out', str(out))
+        js = out.read_text(encoding='utf-8')
+        self.assertTrue(js.startswith('export const meta = {'))
+        self.assertEqual(js.count('label: "a"'), 1)
+        self.assertEqual(js.count('parallel('), 2)
+        self.assertIn('--status running', js)
+        self.assertNotIn('Date.now', js); self.assertNotIn('Math.random', js)
+        self.assertLess(js.index('label: "a"'), js.index('label: "b"'))
+        node = shutil.which('node')
+        if node:
+            r = subprocess.run([node, '--check', str(out)], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_default_path_and_invalid_plan(self):
+        self.init()
+        self.g('export-workflow', 'r1', code=2)
+        self.node('a', 'pending', '--depends-on', 'b')
+        self.g('export-workflow', 'r1', code=3)
+        self.node('b', 'pending')
+        self.g('export-workflow', 'r1')
+        self.assertTrue((Path(self.dir) / '.claude/workflows/graph-r1.js').exists())

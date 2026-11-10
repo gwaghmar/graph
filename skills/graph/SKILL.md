@@ -34,6 +34,8 @@ Below, `G` means that command.
    - If the runtime refuses, read the line. Do what it says. Do not work around it.
 6. Run `G quality <run>`. Fix failures. Then run `G finish <run> --status complete`. If you cannot finish, use `--status failed`.
 
+On Claude Code with the Workflow tool, prefer `G export-workflow <run>` after `validate`. It writes `.claude/workflows/graph-<run>.js`, one agent per node, run level by level. Each agent calls `G node` itself, so the gates still apply. Run that script with the Workflow tool instead of steps 5 and 6.
+
 Show the final summary to the user.
 
 ## Rules

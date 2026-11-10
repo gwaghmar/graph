@@ -486,6 +486,49 @@ def cmd_validate(a):
         print('\n'.join(f'✖ {x}' for x in problems)); raise SystemExit(1)
     print(f'✔ plan valid: {len(nodes)} nodes, all dependencies known, no cycles')
 
+def js(x): return json.dumps(x, ensure_ascii=True)
+
+def cmd_export_workflow(a):
+    _, d = load(a.run); nodes = d.get('nodes', [])
+    if not nodes: die(2, f'Run {a.run} has no nodes. Add the plan first, then export.')
+    try:
+        with contextlib.redirect_stdout(sys.stderr): cmd_validate(argparse.Namespace(run=a.run))
+    except SystemExit:
+        die(3, f'Refused: plan for {a.run} is not valid. Fix it until "validate {a.run}" passes, then export.')
+    levels = node_levels(d); by = {}
+    for n in nodes: by.setdefault(levels[n['id']], []).append(n)
+    g = f'python3 "{Path(__file__).resolve().as_posix()}"'
+    def mark(n, status): return f"{g} node {shlex.quote(a.run)} {shlex.quote(n['id'])} --role {shlex.quote(n.get('role') or 'worker')} --status {status}"
+    def prompt(n):
+        lines = [f"You are one node of a graph run. Node: {n['id']}. Goal: {n.get('goal') or n.get('role') or n['id']}."]
+        if n.get('files'): lines.append('Files: ' + ', '.join(n['files']) + '.')
+        lines += ['1. Before work, run: ' + mark(n, 'running'), '2. Do the work.']
+        if n.get('check'): lines.append(f"3. Check (the runtime runs it for you on complete): {n['check']}")
+        lines += [f"{'4' if n.get('check') else '3'}. When done, run: {mark(n, 'complete')}",
+                  'If a command exits 3, it is a refusal. Read the line and follow it. Do not work around it.',
+                  f"If you cannot finish, run: {mark(n, 'failed')}",
+                  'Reply with ok true only if the complete command succeeded, else ok false with a short summary.']
+        return '\n'.join(lines)
+    title = lambda i: f'Level {i + 1}'
+    phases = ',\n'.join(f'    {js(title(i))}' for i in range(len(by)))
+    out = ['export const meta = {', f'  name: {js("graph-" + a.run)},',
+           f'  description: {js("Graph run " + a.run + ": " + str(d.get("task", ""))[:120])},',
+           '  phases: [', phases, '  ],', '}', '',
+           "const schema = { type: 'object', required: ['ok', 'summary'], properties: { ok: { type: 'boolean' }, summary: { type: 'string' } } }",
+           'let stopped = false', '']
+    for i in sorted(by):
+        out += [f'if (!stopped) {{', f'  phase({js(title(i))})', '  const results = await parallel([']
+        out += [f"    () => agent({js(prompt(n))}, {{ label: {js(n['id'])}, schema }})," for n in by[i]]
+        out += ['  ])', '  const bad = results.findIndex(r => r === null || !r.ok)', '  if (bad !== -1) {',
+                f'    log("Node failed or returned nothing at {title(i)}. Stopping so dependents do not start.")',
+                f"    await agent({js('Run: ' + g + ' finish ' + shlex.quote(a.run) + ' --status failed')}, {{ label: 'mark-failed' }})",
+                '    stopped = true', '  }', '}', '']
+    out += ['if (!stopped) {', f"  await agent({js('Run: ' + g + ' quality ' + shlex.quote(a.run) + ' then ' + g + ' finish ' + shlex.quote(a.run) + ' --status complete')}, {{ label: 'finish' }})", '}', '']
+    path = Path(a.out) if a.out else Path('.claude/workflows') / f'graph-{a.run}.js'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('\n'.join(out), encoding='utf-8')
+    print(f'Wrote {path}: {len(nodes)} agents in {len(by)} levels. Run it with the Workflow tool.')
+
 def cmd_retry_plan(a):
     _,d=load(a.run); failed=[n['id'] for n in d.get('nodes',[]) if n.get('status')=='failed']
     selected=descendants(d,failed) if a.include_dependents else set(failed)
@@ -562,6 +605,7 @@ def main():
     x=sp.add_parser('quality');x.add_argument('run');x.add_argument('--command',action='append');x.add_argument('--timeout',type=int,default=300);x.set_defaults(fn=cmd_quality,nolock=True)
     x=sp.add_parser('validate');x.add_argument('run');x.set_defaults(fn=cmd_validate,nolock=True)
     x=sp.add_parser('retry-plan');x.add_argument('run');x.add_argument('--include-dependents',action='store_true');x.set_defaults(fn=cmd_retry_plan,nolock=True)
+    x=sp.add_parser('export-workflow');x.add_argument('run');x.add_argument('--out');x.set_defaults(fn=cmd_export_workflow,nolock=True)
     x=sp.add_parser('resume');x.set_defaults(fn=cmd_resume)
     x=sp.add_parser('render');x.add_argument('run');x.set_defaults(fn=cmd_render,nolock=True)
     x=sp.add_parser('tree');x.add_argument('run');x.set_defaults(fn=cmd_tree,nolock=True)
