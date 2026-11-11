@@ -154,6 +154,11 @@ def graph_cmd():
 def preflight_done(d):
     return bool(d.get('skip_preflight')) or any(e.get('cmd') == 'preflight' and e.get('outcome') == 'ok' for e in read_log(d['id']))
 
+def plan_hash(d):
+    """Fingerprint of the plan: node ids, dependencies, goals and checks."""
+    rows = sorted((n['id'], sorted(n.get('depends_on', [])), (n.get('goal') or '').strip(), n.get('check') or '') for n in d.get('nodes', []))
+    return hashlib.sha256(json.dumps(rows, ensure_ascii=True).encode('utf-8')).hexdigest()[:16]
+
 def start_gaps(d):
     """Steps still missing before any node may start, as (key, text). Runs made before schema 4 only need preflight."""
     c, rid, gaps = graph_cmd(), d['id'], []
@@ -167,7 +172,10 @@ def start_gaps(d):
                                     f"(or create the run with init --skip-context \"<reason>\" if this host has no user files)"))
         if not d.get('toolkit'):
             gaps.append(('choose', f"choose: run {c} tools --run {rid} --task \"<task>\", then {c} choose --run {rid} --skills a,b --clis gh --why \"<one line>\""))
-    if not (d.get('approval') or d.get('auto_approve')):
+    ap = d.get('approval')
+    if ap and not d.get('auto_approve') and ap.get('plan') and ap['plan'] != plan_hash(d):
+        gaps.append(('approve', f"approve: the plan changed after approval. Re-show the plan to the user, and only after they say go run {graph_cmd()} approve --run {d['id']} --note \"<the user's words>\""))
+    elif not (ap or d.get('auto_approve')):
         gaps.append(('approve', f"approve: show the plan to the user, and only after they say go run {c} approve --run {rid} --note \"<the user's words>\"  "
                                 f"(or create the run with init --auto-approve \"<the user's words>\" if they already said to go ahead without review)"))
     return gaps
@@ -521,6 +529,7 @@ def run_info(d):
     c=d.get('context'); extra=''
     if d.get('skip_context'): st=f"0 (context step waived: {short(d['skip_context'],80)})"
     elif not c: st='0 (the context command was not run)'
+    elif c.get('no_memory'): st='unknown (memory index not found for this folder)'
     else: st=f"{len(c.get('stale',[]))}"+(f" ({', '.join(c['stale'][:10])})" if c.get('stale') else '')
     kit=d.get('toolkit'); ap=d.get('approval')
     toolkit='- Toolkit: '+('; '.join(f"{k} {', '.join(kit[k])}" for k in ('skills','plugins','clis','mcp') if kit.get(k)) or 'no extra tools')+f". Why: {short(kit['why'],80)}" if kit else '- Toolkit: not recorded.'
@@ -852,8 +861,8 @@ def cmd_status(a):
 
 def cmd_context(a):
     _, d = load(a.run)
-    text, stale, total = userctx.context_report(Path.cwd(), Path.home())
-    d['context'] = {'at': now(), 'files': total, 'stale': stale}
+    text, stale, total = userctx.context_report(Path.cwd(), Path.home(), project=a.project_dir)
+    d['context'] = {'at': now(), 'files': total, 'stale': stale, 'no_memory': 'memory index not found' in text}
     d['updated_at'] = now(); save(ROOT / a.run / 'state.json', d); print(text)
 
 def cmd_profile(a):
@@ -898,7 +907,13 @@ def cmd_approve(a):
     _, d = load(a.run)
     note = (a.note or '').strip()
     if not note: die(2, 'approve needs --note "<what the user said>". Quote the user. Never approve for them.')
-    d['approval'] = {'at': now(), 'note': note[:500]}
+    if not d.get('nodes'): die(2, f'Refused: run {a.run} has no nodes. Add the plan, show it to the user, then approve.')
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf): cmd_validate(argparse.Namespace(run=a.run))
+    except SystemExit:
+        die(3, f'Refused: plan for {a.run} is not valid. Fix it until "validate {a.run}" passes, show it again, then approve.\n' + buf.getvalue().rstrip())
+    d['approval'] = {'at': now(), 'note': note[:500], 'plan': plan_hash(d)}
     d['updated_at'] = now(); save(ROOT / a.run / 'state.json', d); print('Approval recorded.')
 
 def cmd_preflight(a):
@@ -914,7 +929,7 @@ def cmd_preflight(a):
     except Exception as e: print(f'preflight scan incomplete ({type(e).__name__}). Continue without it or retry with --refresh.')
 
 # ---- run log: .graph/runs/<id>/log.jsonl, append-only, one JSON line per command call ----
-LOG_ARGS = ('text', 'note', 'why', 'skills', 'plugins', 'clis', 'mcp', 'task_text', 'auto_approve', 'skip_context', 'skip_preflight', 'goal', 'status', 'depends_on', 'check', 'target', 'risk', 'reason', 'command', 'type', 'needs', 'refresh',
+LOG_ARGS = ('project_dir', 'text', 'note', 'why', 'skills', 'plugins', 'clis', 'mcp', 'task_text', 'auto_approve', 'skip_context', 'skip_preflight', 'goal', 'status', 'depends_on', 'check', 'target', 'risk', 'reason', 'command', 'type', 'needs', 'refresh',
             'with_accounts', 'include_dependents')
 
 def log_path(run_id): return ROOT / run_id / 'log.jsonl'
@@ -1001,7 +1016,7 @@ def main():
     x=sp.add_parser('finish');x.add_argument('run');x.add_argument('--status',default='complete',choices=['complete','failed']);x.set_defaults(fn=cmd_finish)
     x=sp.add_parser('status');x.add_argument('run');x.set_defaults(fn=cmd_status,nolock=True)
     x=sp.add_parser('log');x.add_argument('run');x.add_argument('--refusals',action='store_true');x.add_argument('--node');x.add_argument('--json',action='store_true');x.set_defaults(fn=cmd_log,nolock=True)
-    x=sp.add_parser('context');x.add_argument('--run',required=True);x.set_defaults(fn=cmd_context)
+    x=sp.add_parser('context');x.add_argument('--run',required=True);x.add_argument('--project-dir',dest='project_dir');x.set_defaults(fn=cmd_context)
     x=sp.add_parser('profile');x.add_argument('--run',required=True);x.add_argument('--text');x.set_defaults(fn=cmd_profile)
     x=sp.add_parser('tools');x.add_argument('--run',required=True);x.add_argument('--task',dest='task_text');x.set_defaults(fn=cmd_tools,nolock=True)
     x=sp.add_parser('choose');x.add_argument('--run',required=True);x.add_argument('--skills');x.add_argument('--plugins');x.add_argument('--clis');x.add_argument('--mcp');x.add_argument('--why');x.set_defaults(fn=cmd_choose)

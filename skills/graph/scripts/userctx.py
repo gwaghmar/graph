@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Graph: read the user, pick tools. Helpers for the context and tools commands.
 Prints file names, dates and ages only. It never prints file bodies, env values or the OS user name:
-home paths are shown as ~ and the memory folder name is never shown."""
+home paths are shown as ~ and the memory folder name is never shown (the context and tools commands, and preflight --json)."""
 from __future__ import annotations
 import datetime, os, re, time
 from pathlib import Path
@@ -20,8 +20,9 @@ def _day_from_mtime(p):
 def _age(day, today):
     return (datetime.date.fromisoformat(today) - day).days
 
-def memory_dir(cwd, home):
-    return home / '.claude' / 'projects' / re.sub(r'[^A-Za-z0-9]', '-', str(cwd)) / 'memory'
+def memory_dir(cwd, home, project=None):
+    """Memory folder of this project (see preflight.memory_index for how the project folder is chosen)."""
+    return preflight.memory_index(cwd, home, override=project).parent
 
 def note_day(p):
     """Date of a memory note: metadata.modified from its frontmatter if present, else the file mtime."""
@@ -43,7 +44,7 @@ def linked_notes(index):
         names.append(n)
     return names
 
-def context_entries(cwd, home, today):
+def context_entries(cwd, home, today, project=None):
     """List of dicts: group, label, day, age, flag, stale. Highest priority first."""
     out = []
     def add(group, label, p, flag=''):
@@ -60,7 +61,7 @@ def context_entries(cwd, home, today):
     for label, p in (('./CLAUDE.md', cwd / 'CLAUDE.md'), ('./AGENTS.md', cwd / 'AGENTS.md')):
         if p.is_file(): add('project', label, p)
     rules('project', cwd / '.cursor', './.cursor/')
-    mem = memory_dir(cwd, home)
+    mem = memory_dir(cwd, home, project)
     if (mem / 'MEMORY.md').is_file():
         add('memory', 'memory index (MEMORY.md)', mem / 'MEMORY.md')
         for n in linked_notes(mem / 'MEMORY.md')[:MAX_NOTES]:
@@ -73,10 +74,11 @@ def context_entries(cwd, home, today):
                         'flag': how, 'stale': stale})
     return out
 
-def context_report(cwd, home, today=None):
+def context_report(cwd, home, today=None, project=None):
     """Return (text, stale note names, number of files)."""
     today = today or today_utc()
-    entries = context_entries(cwd, home, today)
+    entries = context_entries(cwd, home, today, project)
+    no_mem = not any(e['group'] == 'memory' for e in entries)
     lines = [f'Today is {today}.', 'User context, highest priority first (global, then project, then memory):']
     if not entries: lines.append('  none found')
     for i, e in enumerate(entries, 1):
@@ -85,7 +87,8 @@ def context_report(cwd, home, today=None):
         mark = '  STALE: check before using' if e['stale'] else ''
         lines.append(f"  {i}. {e['group']:<7} {e['label']}{flag}  {e['day']} ({ago}){mark}")
     stale = [e['label'].replace('memory note ', '') for e in entries if e['stale']]
-    lines.append(f'Stale: {len(stale)} notes' + (f" ({', '.join(stale[:20])})" if stale else ''))
+    if no_mem: lines.append('Stale: unknown, memory index not found for this folder (pass --project-dir <folder the session started in> to point at it)')
+    else: lines.append(f'Stale: {len(stale)} notes' + (f" ({', '.join(stale[:20])})" if stale else ''))
     lines.append('On Claude Code these files are already in context: do not re-read them. '
                  'On other hosts, read the global files, then the project files, now.')
     lines.append(f'Rules: a STALE note is a hint to verify, not a fact. If two rules conflict, the newer and more specific one wins: say so. '

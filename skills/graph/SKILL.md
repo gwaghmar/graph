@@ -20,7 +20,7 @@ Below, `G` means that command.
 
 ## Start: read the user, pick tools, agree the plan
 
-Do these in order. The runtime refuses to start any node (exit 3) until the steps marked with a command are recorded, and it lists what is missing.
+Do these in order. The runtime refuses to start any node (exit 3) until preflight, profile, choose and approve are recorded (or waived at init), and it lists what is missing. `context` and `validate` are not gated, so run them. If the plan changes after approval, show it again and approve again.
 
 1. **Size the task.** One-line or trivial tasks skip the graph. Just do them. Otherwise run `G init "<task>" --host <host>` now. It prints a run id. Use `--auto-approve "<the user's words>"` if the request already says "just do it" or similar. Use `--skip-context "<reason>"` only on a host with no user files, and `--skip-preflight "<reason>"` only if the user declined preflight.
 2. **Read the user.** Run `G context --run <id>`. It prints today's date and lists the user's global, project and memory files with their age. On Claude Code these files are already in context: do not read them again. On other hosts, read the global files, then the project files, now. Follow the rules as of today. Then run `G profile --run <id> --text "<how this user works>"`: at most 10 lines on their preferences, style, what they care about, and tools they like or avoid.

@@ -3,7 +3,7 @@
 Records names and yes/no answers only. It parses MCP config files but keeps only server names,
 and never stores or prints env values, tokens or other config values."""
 from __future__ import annotations
-import json, os, platform, re, shutil, subprocess, sys, time
+import contextlib, json, os, platform, re, shutil, subprocess, sys, time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -198,24 +198,53 @@ def plugin_dirs(home, key):
             p = Path(e['installPath']).resolve()
             if p.is_dir() and root in p.parents: found.append(p)
         except Exception: pass
-    if not found and market:
-        try: found = sorted((d for d in (root / 'cache' / market / name).iterdir() if d.is_dir()), key=lambda d: d.stat().st_mtime)[-1:]
+    if not found and market and not any(s in part for part in (market, name) for s in ('/', '\\', '..')):
+        try:
+            cands = sorted((d.resolve() for d in (root / 'cache' / market / name).iterdir() if d.is_dir()), key=lambda d: d.stat().st_mtime)
+            found = [c for c in cands if root in c.parents][-1:]
         except Exception: pass
     return found
 
-def find_skill_files(base, cap=300, depth=6):
-    out = []
-    for dirpath, dirs, files in os.walk(base):
-        dirs[:] = [d for d in dirs if d not in ('node_modules', '.git')]
-        if len(Path(dirpath).relative_to(base).parts) >= depth: dirs[:] = []
-        if 'SKILL.md' in files: out.append(Path(dirpath) / 'SKILL.md')
+def find_skill_files(base, manifest=None, cap=300):
+    """SKILL.md files Claude Code loads from a plugin: skills/<name>/SKILL.md, plus skill folders that plugin.json declares.
+    No recursive walk, so deprecated or sample folders are not listed. Only paths under the plugin folder are used."""
+    base = Path(base).resolve()
+    out, dirs = [], []
+    try: dirs += sorted(p for p in (base / 'skills').iterdir() if p.is_dir())
+    except OSError: pass
+    decl = (manifest or {}).get('skills')
+    for s in ([decl] if isinstance(decl, str) else decl if isinstance(decl, list) else []):
+        if not isinstance(s, str): continue
+        try: q = (base / s).resolve()
+        except Exception: continue
+        if q != base and base in q.parents and q.is_dir():
+            if (q / 'SKILL.md').is_file(): dirs.append(q)
+            else:
+                try: dirs += sorted(x for x in q.iterdir() if x.is_dir())
+                except OSError: pass
+    for d in dirs:
+        f = d / 'SKILL.md'
+        try: ok = f.is_file() and base in f.resolve().parents
+        except OSError: ok = False
+        if ok and f not in out: out.append(f)
         if len(out) >= cap: break
     return out
+
+def merged_settings(cwd, home):
+    """enabledPlugins and skillOverrides merged in Claude Code order: user, project settings.json, project settings.local.json. Later wins."""
+    out = {'enabledPlugins': {}, 'skillOverrides': {}}
+    for p in (home / '.claude' / 'settings.json', cwd / '.claude' / 'settings.json', cwd / '.claude' / 'settings.local.json'):
+        s = read_json(p)
+        for k in out:
+            if isinstance(s.get(k), dict): out[k].update(s[k])
+    return out
+
+NAME_RE = re.compile(r'^[\w.-]+$')
 
 def skill_catalog(cwd, home):
     """Skills and plugins with name and a description cut to 200 chars. Never the body of any file.
     off is true for skills in skillOverrides set to off, and for plugins (and their skills) switched off in enabledPlugins."""
-    settings = read_json(home / '.claude' / 'settings.json')
+    settings = merged_settings(cwd, home)
     items, seen = [], set()
     def add(it):
         k = (it['kind'], it['name'], it['src'])
@@ -231,15 +260,20 @@ def skill_catalog(cwd, home):
     for key in sorted(enabled):
         name = key.partition('@')[0]; off = enabled[key] is not True
         dirs = safe(lambda: plugin_dirs(home, key), [])
-        desc = ''
+        desc, real, manifest = '', '', {}
         for d in dirs:
-            try: desc = desc or str(read_json(d / '.claude-plugin' / 'plugin.json').get('description') or '')
+            try:
+                m = read_json(d / '.claude-plugin' / 'plugin.json')
+                if isinstance(m, dict):
+                    desc = desc or str(m.get('description') or '')
+                    if not real and isinstance(m.get('name'), str) and NAME_RE.match(m['name']): real, manifest = m['name'], m
             except Exception: pass
+        prefix = real or name
         add({'name': name, 'kind': 'plugin', 'src': key.partition('@')[2] or 'plugin', 'desc': ' '.join(desc.split())[:DESC_MAX],
              'off': off, 'off_why': 'enabledPlugins is false' if off else ''})
         for d in dirs:
-            for f in find_skill_files(d):
-                add(skill_item(f, 'plugin ' + name, settings, plugin=name, plugin_off=off))
+            for f in find_skill_files(d, manifest):
+                add(skill_item(f, 'plugin ' + name, settings, plugin=prefix, plugin_off=off))
     return items
 
 def skill_names(cwd, home):
@@ -254,10 +288,28 @@ def always_apply(p):
         return bool(re.search(r'^alwaysApply:\s*true\s*$', front, re.M))
     except Exception: return False
 
+def project_root(cwd, env=None, override=None):
+    """Folder Claude Code keys its memory by: --project-dir, else CLAUDE_PROJECT_DIR, else the git top-level, else cwd."""
+    env = os.environ if env is None else env
+    for v in (override, env.get('CLAUDE_PROJECT_DIR')):
+        if v:
+            with contextlib.suppress(Exception):
+                q = Path(v).expanduser()
+                if q.is_dir(): return q.resolve()
+    with contextlib.suppress(Exception):
+        r = subprocess.run(['git', 'rev-parse', '--show-toplevel'], text=True, capture_output=True, encoding='utf-8', errors='replace', cwd=str(cwd), timeout=10)
+        if r.returncode == 0 and r.stdout.strip(): return Path(r.stdout.strip()).resolve()
+    return Path(cwd)
+
+def memory_index(cwd, home, env=None, override=None):
+    """MEMORY.md path for this project, trying the project root first, then cwd. Returns the first one that exists, else the project-root path."""
+    roots = [project_root(cwd, env, override), Path(cwd)]
+    paths = [home / '.claude' / 'projects' / re.sub(r'[^A-Za-z0-9]', '-', str(r)) / 'memory' / 'MEMORY.md' for r in roots]
+    return next((p for p in paths if p.is_file()), paths[0])
+
 def context_files(cwd, home):
     found = []
-    slug = re.sub(r'[^A-Za-z0-9]', '-', str(cwd))
-    mem = home / '.claude' / 'projects' / slug / 'memory' / 'MEMORY.md'
+    mem = memory_index(cwd, home)
     for label, p in (('./CLAUDE.md', cwd / 'CLAUDE.md'), ('~/.claude/CLAUDE.md', home / '.claude/CLAUDE.md'),
                      ('./AGENTS.md', cwd / 'AGENTS.md'), ('~/.codex/AGENTS.md', home / '.codex/AGENTS.md'),
                      ('claude memory (MEMORY.md)', mem)):
@@ -404,10 +456,5 @@ def run_preflight(needs, refresh=False, with_accounts=False, as_json=False, info
         info['workarounds'] = {k: d['workaround'] for k, d in r.get('needs', {}).items() if not d['use']}
         info['access'] = dict(r['access'])
         if with_accounts: info['accounts'] = dict(r.get('accounts', {}))
-    if as_json:  # full memory path only here, never in the summary or the cache
-        slug = re.sub(r'[^A-Za-z0-9]', '-', str(Path.cwd()))
-        for c in r['context']:
-            if c['path'] == 'claude memory (MEMORY.md)':
-                c['full_path'] = f'~/.claude/projects/{slug}/memory/MEMORY.md'
     if as_json: return json.dumps(r, indent=2)
     return summary(r)

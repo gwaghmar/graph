@@ -375,8 +375,8 @@ class FreshnessTests(Base):
         self.g('context', '--run', 'r1')
         self.g('profile', '--run', 'r1', '--text', 'terse')
         self.g('choose', '--run', 'r1', '--skills', 'x', '--why', 'w')
-        self.g('approve', '--run', 'r1', '--note', 'go ahead please')
         self.g('node', 'r1', 'a', '--role', 'w', '--status', 'pending', '--goal', 'g')
+        self.g('approve', '--run', 'r1', '--note', 'go ahead please')
         self.node('running'); self.node('complete')
         self.g('finish', 'r1', '--status', 'failed')
         s = (self.proj / '.graph/runs/r1/summary.md').read_text(encoding='utf-8')
@@ -397,3 +397,48 @@ class FreshnessTests(Base):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class ReviewFixTests(Base):
+    def test_approve_needs_plan_and_is_tied_to_it(self):
+        self.init()
+        self.g('approve', '--run', 'r1', '--note', 'go', code=2)  # no nodes
+        self.g('context', '--run', 'r1'); self.g('profile', '--run', 'r1', '--text', 't')
+        self.g('choose', '--run', 'r1', '--skills', 'x', '--why', 'w')
+        self.g('node', 'r1', 'a', '--role', 'w', '--status', 'pending', '--goal', 'g')
+        self.g('approve', '--run', 'r1', '--note', 'go')
+        self.g('node', 'r1', 'b', '--role', 'w', '--status', 'pending', '--goal', 'g2')
+        r = self.g('node', 'r1', 'a', '--role', 'w', '--status', 'running', '--goal', 'g', code=3)
+        self.assertIn('plan changed after approval', r.stderr)
+        self.g('approve', '--run', 'r1', '--note', 'go again')
+        self.node('running')
+
+    def test_memory_from_project_dir_and_missing_notice(self):
+        other = self.home / 'elsewhere'; other.mkdir()
+        slug = re.sub(r'[^A-Za-z0-9]', '-', str(other))
+        write(self.home / '.claude' / 'projects' / slug / 'memory' / 'MEMORY.md', '- [N](n.md) x\n')
+        write(self.home / '.claude' / 'projects' / slug / 'memory' / 'n.md', '---\nname: n\n---\nb', 60)
+        self.init()
+        r = self.g('context', '--run', 'r1')
+        self.assertIn('memory index not found for this folder', r.stdout)
+        self.assertNotIn('Stale: 0', r.stdout)
+        r = self.g('context', '--run', 'r1', '--project-dir', str(other))
+        self.assertIn('Stale: 1 notes', r.stdout)
+        self.env_extra['CLAUDE_PROJECT_DIR'] = str(other)
+        self.assertIn('Stale: 1 notes', self.g('context', '--run', 'r1').stdout)
+
+    def test_plugin_prefix_settings_merge_skills_dir_and_traversal(self):
+        sys.path.insert(0, str(Path(GRAPH).parent))
+        import preflight
+        plug = self.home / '.claude' / 'plugins' / 'cache' / 'm' / 'p-key' / '1'
+        write(plug / '.claude-plugin' / 'plugin.json', json.dumps({'name': 'real-name', 'description': 'd'}))
+        write(plug / 'skills' / 'k' / 'SKILL.md', '---\nname: k\ndescription: x\n---\n')
+        write(plug / 'deprecated' / 'old' / 'SKILL.md', '---\nname: old\n---\n')
+        write(self.home / '.claude' / 'settings.json', json.dumps({'enabledPlugins': {'p-key@m': False, 'x@../../../../outside': True}}))
+        write(self.proj / '.claude' / 'settings.local.json', json.dumps({'enabledPlugins': {'p-key@m': True}}))
+        names = {(i['kind'], i['name']): i for i in preflight.skill_catalog(self.proj, self.home)}
+        self.assertIn(('skill', 'real-name:k'), names)
+        self.assertFalse(names[('skill', 'real-name:k')]['off'])
+        self.assertNotIn(('skill', 'real-name:old'), names)
+        self.assertNotIn(('skill', 'p-key:old'), names)
+        self.assertFalse([k for k in names if k[1].startswith('x:')])
