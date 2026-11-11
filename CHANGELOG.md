@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added (outside skills and repos)
+- `find`, `candidate`, `scan`, `pick`, `keep`, `vendor-run`, `parts` and `part-none`: look for skills and repos people already made (Reddit, Hacker News, GitHub, plus X and web finds from the model), apply a trust bar (200 stars or 3 mentions, and updated in 90 days), show the top 3 with one recommended, scan the pick without running it, install it in the project only and remove it at `finish` unless kept.
+- `init --size large`: `approve` is refused until each part has a pick or a "none found" note.
+- `vendor-run` runs a picked tool with no shell and a scrubbed env. It is not a full sandbox.
+
 ### Added (usage budget)
 - `budget --run <id>`: usage left per window with local reset time (Codex rollout files, or the Claude Code statusline cache), a plan estimate by (tier, role) from your history with shipped defaults under 5 samples, and a recommendation (all now, lighter tier, levels 1-N now, or the user decides). The step is required before approve and node start. `init --skip-budget "<reason>"` waives it.
 - `budget --left-pct N --resets HH:MM` records the user's answer when the host gives no usage.

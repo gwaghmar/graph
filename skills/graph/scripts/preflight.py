@@ -33,14 +33,14 @@ def read_json(p):
         return d if isinstance(d, dict) else {}
     except Exception: return {}
 
-def run_proc(cmd, timeout, shell=False, merge=False, capture=True):
+def run_proc(cmd, timeout, shell=False, merge=False, capture=True, env=None, cwd=None):
     """Run a command and kill its whole process tree on timeout. Return (code, stdout, stderr, timed_out).
     shell=True is for plan commands only. On timeout the code is None."""
     kw = {'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == 'nt' else {'start_new_session': True}
     pipe = subprocess.PIPE if capture else subprocess.DEVNULL
     p = subprocess.Popen(cmd, shell=shell, stdin=subprocess.DEVNULL, stdout=pipe,
                          stderr=subprocess.STDOUT if merge and capture else pipe,
-                         text=True, encoding='utf-8', errors='replace', **kw)
+                         text=True, encoding='utf-8', errors='replace', env=env, cwd=cwd, **kw)
     try:
         out, err = p.communicate(timeout=timeout)
         return p.returncode, out or '', err or '', False

@@ -83,6 +83,13 @@ In normal use the agent runs these for you. Type `/graph <task>` on Claude Code,
 | `choose --run id [--skills --plugins --clis --mcp] --why "..."` | Record the chosen toolkit |
 | `budget --run id [--left-pct N --resets HH:MM] [--host auto]` | Usage left per window with reset time, plan estimate, and a recommendation. Required before approve. `--left-pct` records the user's answer when the host gives no usage |
 | `defer <run> --from-level N --not-before ISO` | Refuse starting nodes on level N and up until that time. A printed suggestion: nothing is scheduled |
+| `find --run id --part P --query "..."` | Search Reddit, Hacker News and GitHub (no login, last 90 days) for skills and repos people already made. Trust bar, top 3, one recommended |
+| `candidate --run id --part P --url U --mentions N --note "..."` | Add a find from X or the web. GitHub links are checked the same way |
+| `scan --run id --part P --pick owner/repo` | Shallow clone into `.graph/vendor` and a static safety scan: clean, warn or block |
+| `pick --run id --part P --use owner/repo [--as skill\|reference\|tool] [--ok "..."]` | Use a scanned find. Refuses unscanned or blocked. A skill installs in this project only, after approve |
+| `keep --run id --pick owner/repo` | Keep a pick at finish. The rest is removed |
+| `vendor-run --run id --pick owner/repo [--in vendor\|project] -- cmd...` | Run a picked tool, no shell, PATH and LANG and a temporary HOME only. Not a full sandbox |
+| `parts --run id --set a,b`, `part-none --run id --part P --note "..."` | Name the parts of a large job and log "none found". `init --size large` blocks approve until each part has a pick or a note |
 | `approve --run id --note "..."` | Record the user's go-ahead, in their words |
 | `node <run> <id> --role R --status S [...]` | Add or update a node, with rule checks |
 | `validate <run>` | Reject bad dependencies |
@@ -122,6 +129,10 @@ Claude Code statusline helper (opt-in): `npx graph-skill statusline --enable` pr
 Token ledger: `usage` reads usage numbers, model ids, timestamps and ids from Claude Code transcripts (`~/.claude/projects/<project>/`, including subagent files) and Codex sessions (`~/.codex/sessions/`). It never reads message content, secrets or tokens. Cost is the API-price equivalent. On a subscription you pay your plan, not this. Other hosts show tokens as unknown. `finish` adds the table to the summary and appends one line per finished node (date, host, role, tokens, duration) to `~/.config/graph-skill/history.jsonl`.
 
 Privacy: `context` and `tools` print file names, dates and skill names with short descriptions only. They never print file bodies or env values, and home paths show as `~`.
+
+## Use what people already built
+
+For each part of a job, `find` looks at Reddit, Hacker News and GitHub, in that order, with no login. The model adds X and web finds with `candidate`. A find is shown only with 200 or more stars or 3 or more mentions in 90 days, and an update in the last 90 days. `scan` reads every file of the top pick without running it: network calls, shell use, secret places, install scripts, hidden code, binaries, hook settings and prompt-injection text. A block cannot be picked. Picks install in the project only and `finish` removes them. `vendor-run` is not a sandbox: it hides your HOME and env values, but the tool can still reach the network and any file you can reach by full path. Everything fetched is treated as untrusted text, and every command and refusal goes to the run log.
 
 ## Routing by capability tier
 

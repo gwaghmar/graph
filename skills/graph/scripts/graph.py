@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from preflight import run_proc
-import userctx, usage, routing, budget
+import userctx, usage, routing, budget, outside
 
 ROOT = Path('.graph/runs')
 STATUSES = ('pending', 'running', 'retrying', 'complete', 'failed', 'skipped', 'cached')
@@ -115,7 +115,7 @@ def cmd_init(a):
     data = {
         'schema_version': 5, 'id': rid, 'run_date': userctx.today_utc(), 'task': a.task, 'host': host, 'host_detected': detected, 'max_retries': a.max_retries,
         'quality_commands': a.quality_command or [], 'status': 'planning', 'created_at': now(), 'updated_at': now(),
-        'git': git_info(), 'nodes': [], 'events': [], 'quality': []
+        'git': git_info(), 'nodes': [], 'events': [], 'quality': [], 'size': a.size
     }
     if a.skip_preflight: data['skip_preflight'] = a.skip_preflight.strip()
     if a.skip_context: data['skip_context'] = a.skip_context.strip()
@@ -679,6 +679,7 @@ def build_summary(d):
     L+=['','## Tokens and cost','']+usage.report_lines(d['usage'] if 'usage' in d else None)
     L+=['','## Usage budget','']+budget.report_lines(d)
     L+=['','## Model routing','']+routing.report_lines(d)
+    L+=['','## Outside skills and repos','']+outside_lines(d)
     L+=['','## What failed','']
     out=failure_history(d)
     out+=[f"- Node {n['id']} is failed now, after {n.get('attempts',0)} attempt(s)." + (f" Check exit was {n['check_exit']}." if n.get('check_exit') not in (None,0) else '') for n in failed
@@ -984,6 +985,7 @@ def cmd_finish(a):
         budget.finish(d, Path.home(), epoch(), budget_host(d), budget.fresh(tot))
     with contextlib.suppress(Exception): usage.write_history(Path.home(), usage.history_entries(d, d['usage']))
     d['status']=status; d['finished_at']=now(); d['updated_at']=now()
+    finish_outside(d)
     d['verify_steps']=verify_plans(d)
     d['access_gaps']=[f"Node {i} could not be fully verified: {a} is missing. Workaround: {c}." for i,st in d['verify_steps'].items() for a,b,c in st if b!='ok']
     save(p, d); render_files(p, d)
@@ -1156,8 +1158,11 @@ def cmd_approve(a):
     except SystemExit:
         die(3, f'Refused: plan for {a.run} is not valid. Fix it until "validate {a.run}" passes, show it again, then approve.\n' + buf.getvalue().rstrip())
     if budget_missing(d): die(3, f'Refused: the budget step is missing. Run {graph_cmd()} budget --run {a.run} first, or create the run with init --skip-budget "<reason>".')
+    gaps = outside_gaps(d)
+    if gaps: die(3, f"Refused: this is a large job. Each part needs a pick or a \"none found\" note first:\n" + '\n'.join('  - ' + g for g in gaps))
     d['approval'] = {'at': now(), 'note': note[:500], 'plan': plan_hash(d)}
     if not d.get('skip_budget') and d.get('schema_version', 3) >= 5: d['budget'] = fresh_budget(d, a)
+    for line in install_staged(d, a.run): print(line)
     d['updated_at'] = now(); save(ROOT / a.run / 'state.json', d); print('Approval recorded.')
     if d.get('budget'): print('\n'.join(tilde(x) for x in budget.lines(d['budget'])))
 
@@ -1173,9 +1178,158 @@ def cmd_preflight(a):
     except ValueError as e: die(2, str(e))
     except Exception as e: print(f'preflight scan incomplete ({type(e).__name__}). Continue without it or retry with --refresh.')
 
+# ---- outside skills and repos: find, candidate, scan, pick, keep, vendor-run ----
+def O(d): return d.setdefault('outside', {'parts': [], 'none': {}, 'picks': []})
+
+def approved(d): return bool(d.get('approval') or d.get('auto_approve'))
+
+def check_part(part):
+    if not outside.PART_RE.match(part or ''): die(2, f'Bad part name: {part!r}. Use letters, digits, "_" and "-" only, 40 characters at most.')
+
+def check_repo(repo):
+    if not outside.valid_repo(repo): die(2, f'Bad repo: {repo!r}. Use owner/repo.')
+
+def outside_gaps(d):
+    """For a large job: parts with neither a pick nor a none-found note. Empty for other sizes."""
+    if d.get('size') != 'large': return []
+    o, c = O(d), graph_cmd()
+    if not o['parts']: return [f'no parts listed. Run {c} parts --run {d["id"]} --set a,b (the parts of this job, for example design,ui,security)']
+    done = {p['part'] for p in o['picks']} | set(o['none'])
+    return [f'{p}: run {c} find --run {d["id"]} --part {p} --query "<words>" then scan and pick, or {c} part-none --run {d["id"]} --part {p} --note "<why>"' for p in o['parts'] if p not in done]
+
+def scan_book(run):
+    try: return json.loads((ROOT / run / 'scan.json').read_text(encoding='utf-8'))
+    except (OSError, ValueError): return {}
+
+def install_staged(d, run):
+    lines = []
+    for pk in O(d)['picks']:
+        if pk['status'] != 'staged': continue
+        if pk['kind'] == 'skill':
+            done, err = outside.install_skill(run, pk['use'])
+            if err: pk['status'] = 'failed'; lines.append(f"Could not install {pk['use']}: {err}")
+            else: pk['status'] = 'ready'; pk['installed'] = done; lines.append(f"Installed skill from {pk['use']} in this project only: {', '.join(done)}")
+        else: pk['status'] = 'ready'
+    return lines
+
+def finish_outside(d):
+    o = O(d)
+    with contextlib.suppress(Exception):
+        removed, kept = outside.cleanup(d['id'], set(o.get('keep', [])))
+        o['cleanup'] = {'removed': removed, 'kept': kept}
+
+def outside_lines(d):
+    o = d.get('outside') or {}
+    if not (o.get('picks') or o.get('none') or o.get('parts') or (ROOT / d['id'] / 'finds').is_dir()): return ['- No outside skills or repos were looked for.']
+    L = []
+    for pk in o.get('picks', []): L.append(f"- Part {pk['part']}: used {pk['use']} as {pk['kind']} (scan {pk.get('verdict', '?')}, {pk['status']}).")
+    for p, why in (o.get('none') or {}).items(): L.append(f'- Part {p}: none found or not needed. {short(why, 100)}')
+    missing = [p for p in o.get('parts', []) if p not in (o.get('none') or {}) and not any(x['part'] == p for x in o.get('picks', []))]
+    if missing: L.append(f"- No pick and no note for: {', '.join(missing)}.")
+    c = o.get('cleanup')
+    if c is None: L.append('- Cleanup has not run yet. Finish removes outside skills and the vendor folder.')
+    else:
+        L.append(f"- Removed at finish: {len(c['removed'])} item(s)." + (f" Kept: {', '.join(c['kept'])}." if c['kept'] else ' Nothing kept.'))
+    return L or ['- Searches ran, nothing was picked.']
+
+def cmd_parts(a):
+    p, d = load(a.run)
+    names = [x.strip() for x in (a.set or '').split(',') if x.strip()]
+    if not names: die(2, 'parts needs --set a,b with at least one part name.')
+    for n in names: check_part(n)
+    O(d)['parts'] = list(dict.fromkeys(names)); d['updated_at'] = now(); save(p, d)
+    print('Parts: ' + ', '.join(O(d)['parts']))
+
+def cmd_part_none(a):
+    p, d = load(a.run); check_part(a.part)
+    if not (a.note or '').strip(): die(2, 'part-none needs --note "<why nothing fits or none is needed>".')
+    O(d)['none'][a.part] = outside.clean(a.note, 300); d['updated_at'] = now(); save(p, d)
+    print(f'Part {a.part}: logged as none found or not needed.')
+
+def cmd_find(a):
+    p, d = load(a.run); check_part(a.part)
+    if not (a.query or '').strip(): die(2, 'find needs --query "<words>". Use generic words, nothing personal.')
+    if len(a.query) > 200: die(2, '--query is too long. Use 200 characters or fewer.')
+    doc = outside.do_find(ROOT / a.run, a.part, a.query.strip())
+    print(tilde(outside.show_doc(doc, a.run, graph_cmd())))
+
+def cmd_candidate(a):
+    p, d = load(a.run); check_part(a.part)
+    try: doc = outside.do_candidate(ROOT / a.run, a.part, a.url, a.mentions, a.note or '')
+    except ValueError as e: die(2, str(e))
+    print(tilde(outside.show_doc(doc, a.run, graph_cmd())))
+
+def cmd_scan(a):
+    p, d = load(a.run); check_part(a.part); check_repo(a.pick)
+    doc = outside.load_doc(ROOT / a.run, a.part)
+    c = next((x for x in (doc or {}).get('candidates', []) if (x.get('repo') or '').lower() == a.pick.lower()), None)
+    if not c: die(3, f'Refused: {a.pick} is not in the finds for part {a.part}. Run find (or candidate) first.')
+    if not c.get('passes'): die(3, f"Refused: {a.pick} is below the trust bar ({c.get('why')}). It is hidden. Scan one of the top 3.")
+    res, err = outside.do_scan(c['repo'])
+    if err: die(1, f'Scan failed for {a.pick}: {err}. Nothing was installed. Try another pick.')
+    res['part'] = a.part
+    book = scan_book(a.run); book[c['repo']] = res; save(ROOT / a.run / 'scan.json', book)
+    print(tilde(outside.show_scan(res, a.run, a.part, graph_cmd())))
+
+def cmd_pick(a):
+    p, d = load(a.run); check_part(a.part); check_repo(a.use)
+    doc = outside.load_doc(ROOT / a.run, a.part)
+    c = next((x for x in (doc or {}).get('candidates', []) if (x.get('repo') or '').lower() == a.use.lower()), None)
+    if not c or not c.get('passes'): die(3, f'Refused: {a.use} is not a shown find for part {a.part}.')
+    repo = c['repo']; r = scan_book(a.run).get(repo)
+    if not r: die(3, f'Refused: {repo} was not scanned. Run {graph_cmd()} scan --run {a.run} --part {a.part} --pick {repo} first.')
+    if r['verdict'] == 'block': die(3, f'Refused: the scan of {repo} says BLOCK. It cannot be picked. Pick another.')
+    if not outside.vendor_dir(repo).is_dir(): die(3, f'Refused: the scanned copy of {repo} is gone. Scan it again.')
+    if a.kind == 'skill' and not outside.skill_dirs(outside.vendor_dir(repo)): die(3, f'Refused: {repo} has no SKILL.md, so it cannot be picked as a skill. Use --as reference or tool.')
+    if r['verdict'] == 'warn' and a.kind != 'reference' and approved(d) and not (a.ok or '').strip():
+        die(3, f'Refused: the scan of {repo} has warnings. Show them to the user and pass --ok "<the user\'s words>".')
+    o = O(d)
+    o['picks'] = [x for x in o['picks'] if not (x['part'] == a.part and x['use'] == repo)]
+    pk = {'part': a.part, 'use': repo, 'kind': a.kind, 'verdict': r['verdict'], 'at': now(), 'status': 'ready' if a.kind == 'reference' else 'staged'}
+    if (a.ok or '').strip(): pk['ok'] = outside.clean(a.ok, 300)
+    o['picks'].append(pk)
+    lines = install_staged(d, a.run) if approved(d) else []
+    d['updated_at'] = now(); save(p, d)
+    if pk['status'] == 'staged' and not approved(d): print(f'Picked {repo} as {a.kind} for part {a.part}. It installs when the plan is approved. Nothing was copied yet.')
+    else: print(f'Picked {repo} as {a.kind} for part {a.part}.')
+    for l in lines: print(tilde(l))
+    if a.kind == 'reference': print(f'Read it in {outside.vendor_dir(repo).as_posix()}. It is removed at finish.')
+
+def cmd_keep(a):
+    p, d = load(a.run); check_repo(a.pick)
+    o = O(d)
+    if not any(x['use'].lower() == a.pick.lower() for x in o['picks']): die(3, f'Refused: {a.pick} was never picked in this run.')
+    repo = next(x['use'] for x in o['picks'] if x['use'].lower() == a.pick.lower())
+    o.setdefault('keep', [])
+    if repo not in o['keep']: o['keep'].append(repo)
+    d['updated_at'] = now(); save(p, d)
+    print(f'{repo} will be kept at finish (the user asked for it).')
+
+def cmd_vendor_run(a):
+    p, d = load(a.run); check_repo(a.pick)
+    argv = list(a.cmd or [])
+    if argv and argv[0] == '--': argv = argv[1:]
+    a.argv = ' '.join(shlex.quote(x) for x in argv)
+    if not argv: die(2, 'vendor-run needs a command after "--", for example: vendor-run --run r --pick o/r -- python3 tool.py')
+    if not approved(d): die(3, 'Refused: the plan is not approved yet. Tools run only after approve.')
+    pk = next((x for x in O(d)['picks'] if x['use'].lower() == a.pick.lower() and x['kind'] == 'tool' and x['status'] == 'ready'), None)
+    if not pk: die(3, f'Refused: {a.pick} is not a picked tool. Scan it, then pick it with --as tool.')
+    vd = outside.vendor_dir(pk['use'])
+    if not vd.is_dir(): die(3, f'Refused: the scanned copy of {pk["use"]} is gone. Scan it again.')
+    cwd = Path.cwd() if a.where == 'project' else vd
+    env = outside.scrubbed_env(outside.TMP / a.run)
+    print('Running inside the project with PATH, LANG and a temporary HOME only. This is NOT a full sandbox: the tool can still use the network and any file this user can reach by full path.')
+    try: code, out, err, timed = run_proc(argv, a.timeout, merge=True, env=env, cwd=str(cwd))
+    except OSError as e: die(2, f'Could not start the command ({type(e).__name__}). Check the program name and PATH.')
+    text = tilde(tail_lines(out + err))
+    if text.strip(): print(text)
+    if timed: die(3, f'The command ran longer than {a.timeout} seconds and was stopped.')
+    if code != 0: die(1, f'The command exited with {code}.')
+
 # ---- run log: .graph/runs/<id>/log.jsonl, append-only, one JSON line per command call ----
 LOG_ARGS = ('project_dir', 'text', 'note', 'why', 'skills', 'plugins', 'clis', 'mcp', 'task_text', 'auto_approve', 'skip_context', 'skip_preflight', 'goal', 'no_check', 'status', 'depends_on', 'check', 'target', 'risk', 'reason', 'command', 'type', 'needs', 'refresh',
-            'with_accounts', 'include_dependents', 'skip_budget', 'left_pct', 'resets', 'from_level', 'not_before', 'host', 'session', 'needs', 'effort', 'model')
+            'with_accounts', 'include_dependents', 'skip_budget', 'left_pct', 'resets', 'from_level', 'not_before', 'host', 'session', 'needs', 'effort', 'model',
+            'part', 'query', 'url', 'mentions', 'pick', 'use', 'kind', 'ok', 'set', 'argv', 'where', 'size')
 
 def log_path(run_id): return ROOT / run_id / 'log.jsonl'
 
@@ -1246,7 +1400,7 @@ def cmd_log(a):
 
 def main():
     ap=argparse.ArgumentParser();sp=ap.add_subparsers(required=True)
-    x=sp.add_parser('init');x.add_argument('task');x.add_argument('--id');x.add_argument('--host');x.add_argument('--max-retries',type=int,default=2);x.add_argument('--quality-command',action='append');x.add_argument('--skip-preflight',metavar='REASON');x.add_argument('--skip-context',metavar='REASON');x.add_argument('--auto-approve',metavar='WORDS');x.add_argument('--skip-budget',metavar='REASON');x.set_defaults(fn=cmd_init)
+    x=sp.add_parser('init');x.add_argument('task');x.add_argument('--id');x.add_argument('--host');x.add_argument('--max-retries',type=int,default=2);x.add_argument('--quality-command',action='append');x.add_argument('--skip-preflight',metavar='REASON');x.add_argument('--skip-context',metavar='REASON');x.add_argument('--auto-approve',metavar='WORDS');x.add_argument('--skip-budget',metavar='REASON');x.add_argument('--size',choices=['small','large'],default='small');x.set_defaults(fn=cmd_init)
     x=sp.add_parser('node');x.add_argument('run');x.add_argument('node');x.add_argument('--role',required=True);x.add_argument('--status',required=True);x.add_argument('--depends-on',nargs='*');x.add_argument('--model');x.add_argument('--needs');x.add_argument('--effort');x.add_argument('--files',nargs='*');x.add_argument('--check');x.add_argument('--no-check',dest='no_check',metavar='REASON');x.add_argument('--target');x.add_argument('--risk');x.add_argument('--goal');x.add_argument('--reason');x.add_argument('--check-timeout',type=int,default=300);x.set_defaults(fn=cmd_node,nolock=True)
     x=sp.add_parser('brief');x.add_argument('run');x.add_argument('node');x.set_defaults(fn=cmd_brief,nolock=True)
     x=sp.add_parser('verify-plan');x.add_argument('run');x.add_argument('node');x.set_defaults(fn=cmd_verify_plan,nolock=True)
@@ -1275,6 +1429,14 @@ def main():
     x=sp.add_parser('defer');x.add_argument('run');x.add_argument('--from-level',type=int,required=True);x.add_argument('--not-before',required=True);x.set_defaults(fn=cmd_defer)
     x=sp.add_parser('approve');x.add_argument('--run',required=True);x.add_argument('--note');x.set_defaults(fn=cmd_approve)
     x=sp.add_parser('preflight');x.add_argument('--run');x.add_argument('--needs');x.add_argument('--refresh',action='store_true');x.add_argument('--with-accounts',action='store_true');x.add_argument('--json',action='store_true');x.set_defaults(fn=cmd_preflight,nolock=True)
+    x=sp.add_parser('parts');x.add_argument('--run',required=True);x.add_argument('--set');x.set_defaults(fn=cmd_parts)
+    x=sp.add_parser('part-none');x.add_argument('--run',required=True);x.add_argument('--part',required=True);x.add_argument('--note');x.set_defaults(fn=cmd_part_none)
+    x=sp.add_parser('find');x.add_argument('--run',required=True);x.add_argument('--part',required=True);x.add_argument('--query');x.set_defaults(fn=cmd_find,nolock=True)
+    x=sp.add_parser('candidate');x.add_argument('--run',required=True);x.add_argument('--part',required=True);x.add_argument('--url',required=True);x.add_argument('--mentions',type=int,default=1);x.add_argument('--note');x.set_defaults(fn=cmd_candidate,nolock=True)
+    x=sp.add_parser('scan');x.add_argument('--run',required=True);x.add_argument('--part',required=True);x.add_argument('--pick',required=True);x.set_defaults(fn=cmd_scan,nolock=True)
+    x=sp.add_parser('pick');x.add_argument('--run',required=True);x.add_argument('--part',required=True);x.add_argument('--use',required=True);x.add_argument('--as',dest='kind',choices=['skill','reference','tool'],default='reference');x.add_argument('--ok');x.set_defaults(fn=cmd_pick)
+    x=sp.add_parser('keep');x.add_argument('--run',required=True);x.add_argument('--pick',required=True);x.set_defaults(fn=cmd_keep)
+    x=sp.add_parser('vendor-run');x.add_argument('--run',required=True);x.add_argument('--pick',required=True);x.add_argument('--in',dest='where',choices=['vendor','project'],default='vendor');x.add_argument('--timeout',type=int,default=300);x.add_argument('cmd',nargs=argparse.REMAINDER);x.set_defaults(fn=cmd_vendor_run,nolock=True)
     a=ap.parse_args()
     try: sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception: pass
