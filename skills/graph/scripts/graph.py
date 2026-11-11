@@ -675,7 +675,7 @@ INSTALL_RE = re.compile(r'\b(pip3?|brew|apt(-get)?) install\b|\bnpm (install|i) 
 
 def outside_paths(d):
     """(node id or 'quality', path) for absolute paths in check commands that lie outside the project, and installs outside it."""
-    try: root = ROOT.resolve().parent.parent.parent
+    try: root = ROOT.resolve().parent.parent  # ROOT is .graph/runs under the project; two levels up is the project root
     except Exception: return []
     rows = [(n['id'], n.get('check')) for n in d.get('nodes', [])] + [('quality', x.get('command')) for x in d.get('quality', [])]
     out = []

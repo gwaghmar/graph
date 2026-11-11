@@ -124,7 +124,9 @@ def v_headless():
     return 'yes' if any(Path(p).exists() for p in paths) else 'no'
 
 def v_ios():
-    if sys.platform != 'darwin' or not shutil.which('xcrun'): return 'no'
+    try: has_xcrun = shutil.which('xcrun')
+    except Exception: return 'unknown'  # the lookup itself broke: say so, not "no"
+    if sys.platform != 'darwin' or not has_xcrun: return 'no'
     r = run(['xcrun', 'simctl', 'help'])
     return 'unknown' if r is None else ('yes' if r[0] == 0 else 'no')
 

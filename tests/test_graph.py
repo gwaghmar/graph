@@ -7,6 +7,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent)); import briefhelp  # no
 GRAPH = str(Path(__file__).resolve().parent.parent / 'skills' / 'graph' / 'scripts' / 'graph.py')
 
 
+TRUE = 'python -c pass' if os.name == 'nt' else 'true'   # no `true` binary on Windows
+
 class GraphCase(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -91,7 +93,7 @@ class Rules(GraphCase):
         self.node('a', 'pending', '--check', 'false')
         self.node('b', 'pending', '--depends-on', 'a')
         self.node('b', 'running', '--depends-on', code=3)
-        self.node('a', 'running', '--check', 'true', code=3)
+        self.node('a', 'running', '--check', TRUE, code=3)
         self.assertEqual([n['status'] for n in self.state()['nodes']], ['pending', 'pending'])
 
     def test_retry_cap_default_is_two(self):
@@ -213,7 +215,7 @@ class Review(GraphCase):
         self.init()
         self.node('a', 'pending', '--check', 'exit 1')
         self.node('a', 'running')
-        self.node('a', 'complete', '--check', 'true', code=3)
+        self.node('a', 'complete', '--check', TRUE, code=3)
         self.node('a', 'complete', code=3)
         self.assertEqual(self.state()['nodes'][0]['check'], 'exit 1')
 
@@ -518,7 +520,7 @@ class Fixes(GraphCase):
         flag.write_text('1')
         self.node('t', 'retrying'); self.node('t', 'complete')              # passes on attempt 2
         self.node('u', 'running'); self.node('u', 'complete')
-        self.g('quality', 'r1', '--command', 'true')
+        self.g('quality', 'r1', '--command', TRUE)
         self.g('finish', 'r1')
         s = self.summary()
         self.assertNotIn('Nothing failed', s)
@@ -538,7 +540,7 @@ class Fixes(GraphCase):
     def test_all_checked_says_so(self):
         import shutil
         self.init('--quality-command', 'python3 -c "pass"' if shutil.which('python3') else 'python -c "pass"')
-        self.node('a', 'pending', '--goal', 'g', '--check', 'true'); self.ran('a')
+        self.node('a', 'pending', '--goal', 'g', '--check', TRUE); self.ran('a')
         self.g('quality', 'r1'); self.g('finish', 'r1')
         self.assertIn('Every node check ran and passed', self.summary())
 
@@ -693,6 +695,17 @@ class SecondRound(GraphCase):
         out = self.md()
         self.assertIn('check depends on /tmp/venv/bin/pytest outside the project; it may fail elsewhere', out)
         self.assertNotIn('local/pytest outside', out)
+
+    def test_sibling_of_project_dir_is_outside(self):
+        # a path next to the project (same parent, e.g. both under /tmp) is still outside it; a path inside is not
+        sib = str(Path(self.dir).resolve().parent / 'venv-sibling' / 'bin' / 'pytest')
+        inside = str(Path(self.dir).resolve() / 'bin' / 'pytest')
+        self.init()
+        self.node('a', 'pending', '--goal', 'g', '--check', sib + ' -q || true')
+        self.node('b', 'pending', '--goal', 'g', '--check', inside + ' -q || true')
+        out = self.md()
+        self.assertIn('venv-sibling/bin/pytest outside the project', out)
+        self.assertNotIn('Node b: check depends', out)
 
     @unittest.skipUnless(have_git(), 'git missing')
     def test_overlapping_nodes_share_files(self):

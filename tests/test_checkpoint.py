@@ -1,6 +1,6 @@
 import os; os.environ.setdefault("GRAPH_SKILL_NO_PROBES", "1")  # never call real CLIs (vercel whoami opens browser sign-in)
 import tempfile as _tf; os.environ.setdefault("GRAPH_SKILL_CONFIG_DIR", _tf.mkdtemp(prefix="graph-perm-"))  # never touch the real ~/.config
-import json, os, subprocess, sys, unittest, urllib.error, urllib.request
+import json, time, os, subprocess, sys, unittest, urllib.error, urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -267,6 +267,22 @@ class BackgroundTests(CP):
     def kill(self, st):
         try: urllib.request.urlopen(urllib.request.Request(st['url'].replace('/?t=', '/stop?t='), data=b'{}', method='POST'), timeout=3).read()
         except Exception: pass
+        end = time.time() + 10   # wait until the server has written its last state and exited, or cleanup races it
+        while time.time() < end:
+            cur = None
+            try: cur = json.loads(self.path('checkpoint.json').read_text(encoding='utf-8'))
+            except Exception: pass
+            alive = False
+            if os.name != 'nt' and isinstance(st.get('pid'), int):
+                try: os.kill(st['pid'], 0); alive = True
+                except OSError: alive = False
+                if alive and cur and cur.get('status') != 'waiting':
+                    try:
+                        with open('/proc/%d/stat' % st['pid']) as f: alive = f.read().split(')')[-1].split()[0] != 'Z'
+                    except Exception: pass
+            if (cur is None or cur.get('status') != 'waiting') and not alive: break
+            time.sleep(0.05)
+        time.sleep(0.2)
 
     def post_ua(self, url, drops, ua):
         u = url.replace('/?t=', '/go?t=')
