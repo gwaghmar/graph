@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from preflight import run_proc
-import userctx, usage, routing, budget, outside, checkpoint, growth
+import userctx, usage, routing, budget, outside, checkpoint, growth, research
 
 ROOT = Path('.graph/runs')
 STATUSES = ('pending', 'running', 'retrying', 'complete', 'failed', 'skipped', 'cached')
@@ -387,7 +387,27 @@ def apply_node(a, result):
     print(ascii_graph(d))
     if refused: die(3, refused)
 
+def research_call(a, fn, *args, **kw):
+    """Run a research rule under the run lock. Refusals become exit 3 with the 👉 lines. A refused source still saves the lock-in flag."""
+    p, d = load(a.run)
+    try: out = fn(d, *args, **kw)
+    except research.Refuse as e:
+        if e.code == 3: d['updated_at'] = now(); save(p, d)
+        die(e.code, e.text())
+    d['updated_at'] = now(); save(p, d)
+    return d, out
+
+BRIEF_FLAGS = ('field', 'sources', 'fresh', 'windows', 'landmark_ok', 'evidence', 'safety', 'review')
+
 def cmd_brief(a):
+    if any(getattr(a, k, None) is not None for k in BRIEF_FLAGS):
+        if not a.run: die(2, 'brief needs --run <id>.')
+        check_run_id(a.run)
+        with run_lock(a.run):
+            d, b = research_call(a, research.set_brief, *[getattr(a, k) for k in BRIEF_FLAGS])
+        print('✔ FIELD BRIEF SAVED\n' + tilde('\n'.join(research.report_lines(d)[:7])) + '\n👉 Do this:\n  1. Add sources: source --run ' + a.run + ' --url <link> --type <kind> --date YYYY-MM-DD --date-source api|page|fetched|none --title "<title>"')
+        return
+    if not a.run or not a.node: die(2, 'brief needs <run> <node> for a retry brief, or --run <id> with --field ... for the field brief.')
     _, d = load(a.run)
     n = get_node(d, a.node) or die(2, f'Unknown node: {a.node}. Check the node id.')
     limit = d.get('max_retries', 2) + 1
@@ -438,6 +458,27 @@ def verify_steps(n, r):
         if step[1] == 'no': break
     if t == 'phone' and os_ not in ('mac',): out = [s for s in out if 'iPhone Mirroring' not in s[0]]
     return out
+
+def cmd_source(a):
+    d, row = research_call(a, research.add_source, a.url, a.type, a.date, a.date_source, a.title, a.landmark, a.why, a.level)
+    n = len(d['research']['sources'])
+    print(f"✔ SOURCE {row['id']} ADDED\n{row['type']} · {row.get('date') or 'undated'} · {row['level']}" + (' · LANDMARK' if row['landmark'] else '') + f"\n{n} valid of {research.MIN_SOURCES} needed.")
+
+def cmd_gap(a):
+    d, row = research_call(a, research.add_gap, a.complaint, a.sources, a.feature)
+    if row.get('feature') and not any(f.get('name') == row['feature'] for f in d.get('features', [])):
+        d.setdefault('features', []).append({'id': f"f{len(d.get('features', [])) + 1}", 'name': row['feature'], 'why': checkpoint.clean(row['complaint'], 80)}); save(ROOT / a.run / 'state.json', d)
+    print(f"✔ GAP {row['id']} ADDED" + ('\n⚠ WEAK: fewer than 2 sources.' if row['weak'] else ''))
+
+def cmd_claim(a):
+    _, row = research_call(a, research.add_claim, a.text, a.sources)
+    print(f"✔ CLAIM {row['id']} ADDED")
+
+def cmd_research(a):
+    if not a.close:
+        _, d = load(a.run); print('\n'.join(research.status_lines(d))); return
+    d, c = research_call(a, research.close, a.partial)
+    print('✔ RESEARCH CLOSED' + (' (PARTIAL)' if c.get('partial') else '') + (f"\nPartial: {c['partial']}" if c.get('partial') else '') + f"\n{c['sources']} valid source(s).")
 
 def cmd_verify_plan(a):
     _, d = load(a.run)
@@ -557,7 +598,7 @@ def ascii_graph(d):
 def summary_text(d):
     s=stats(d)
     rule='━'*46
-    lines=[rule, f"  Graph summary · {d.get('status','?')}", rule, f"Task: {d['task']}", '', ascii_graph(d), '']
+    lines=[rule, f"  Graph summary · {d.get('status','?')}", rule]+[x.replace('## ','') for x in research.safety_block(d)]+[f"Task: {d['task']}", '', ascii_graph(d), '']
     checks=d.get('quality',[])
     if checks:
         lines.append('Checks')
@@ -566,6 +607,7 @@ def summary_text(d):
     if files: lines.append(f"Files ({len(files)}): "+', '.join(files))
     lines.append(parallel_line(d))
     lines.append(f"Stats: retries {s['retries']} · wall {s['wall_ms']/1000:.1f}s · compute {s['duration_ms']/1000:.1f}s")
+    if d.get('field_brief') or d.get('research'): lines+=['','Field brief and sources']+research.report_lines(d)+['']
     lines.append(f"Report: {ROOT/d['id']/'graph.html'}")
     lines.append(rule)
     return '\n'.join(lines)
@@ -710,6 +752,7 @@ def build_summary(d):
     L+=['','## Usage budget','']+budget.report_lines(d)
     L+=['','## Model routing','']+routing.report_lines(d)
     L+=['','## Outside skills and repos','']+outside_lines(d)
+    if d.get('field_brief') or d.get('research'): L+=['','## Field brief and sources','']+research.report_lines(d)
     L+=['','## What failed','']
     out=failure_history(d)
     out+=[f"- Node {n['id']} is failed now, after {n.get('attempts',0)} attempt(s)." + (f" Check exit was {n['check_exit']}." if n.get('check_exit') not in (None,0) else '') for n in failed
@@ -729,7 +772,10 @@ def build_summary(d):
     if unchecked: todo.append(f"- Nothing is required by the runtime, but these nodes had no passing check, so nothing proves them: {', '.join(unchecked)}. Look at them yourself."+(f" Checked and passed: {', '.join(passed)}." if passed else ''))
     elif status=='complete' and nodes and not todo: todo.append('- Nothing. Every node check ran and passed.')
     L+=todo or ['- Nothing to do.']
-    return summary_top(d,status,said,todo)+'\n'.join(L)+'\n'
+    top=summary_top(d,status,said,todo).split('\n')
+    safety=research.safety_block(d)
+    if safety and '## 👉 Do this:' in top: i=top.index('## 👉 Do this:'); top[i:i]=safety
+    return '\n'.join(top)+'\n'.join(L)+'\n'
 
 def verify_plans(d):
     """Verify steps per node with a target, from a preflight scan. Empty on any scan problem."""
@@ -746,14 +792,22 @@ def md_html(text):
     out=[]; items=[]
     def flush():
         if items: out.append('<ul>'+''.join(items)+'</ul>'); items.clear()
+    rows=[]
+    def flush_table():
+        if rows:
+            body=[r for r in rows if not re.fullmatch(r'[|\s:-]+',r)]
+            cells=[[html.escape(c.strip()) for c in r.strip().strip('|').split('|')] for r in body]
+            out.append('<div style="overflow-x:auto"><table class="act">'+''.join('<tr>'+''.join(('<th>' if i==0 else '<td>')+c for c in row)+'</tr>' for i,row in enumerate(cells))+'</table></div>'); rows.clear()
     for line in text.splitlines():
         e=html.escape(line)
+        if line.startswith('|'): flush(); rows.append(line); continue
+        flush_table()
         if line.startswith('- '): items.append('<li>'+re.sub(r'`([^`]*)`',r'<code>\1</code>',html.escape(line[2:]))+'</li>'); continue
         flush()
         if line.startswith('## '): out.append(f'<h3>{html.escape(line[3:])}</h3>')
         elif line.startswith('# '): out.append(f'<h2>{html.escape(line[2:])}</h2>')
         elif line.strip(): out.append(f'<p>{e}</p>')
-    flush(); return '\n'.join(out)
+    flush(); flush_table(); return '\n'.join(out)
 
 def node_evidence(n, steps):
     e=html.escape; st=n.get('status','')
@@ -1185,6 +1239,8 @@ def approval_checks(d, run):
         with contextlib.redirect_stdout(buf): cmd_validate(argparse.Namespace(run=run))
     except SystemExit:
         die(3, f'Refused: plan for {run} is not valid. Fix it until "validate {run}" passes, show it again, then approve.\n' + buf.getvalue().rstrip())
+    if size_of(d) != 'small' and not d.get('field_brief'):
+        die(3, f'Refused: no field brief. Ask yourself what field this is, then write the brief from today\'s sources.\n👉 Do this:\n  1. {graph_cmd()} brief --run {run} --field "<words>" --sources "<best sources today>" --fresh "<rule>" --windows type=days,... --landmark-ok yes|no --evidence "<standard>" --safety "<lines>" --review "<who checks>"\n  2. Show the plan again, then approve.')
     if budget_missing(d): die(3, f'Refused: the budget step is missing. Run {graph_cmd()} budget --run {run} first, or create the run with init --skip-budget "<reason>".')
     gaps = outside_gaps(d)
     if gaps: die(3, f"Refused: each part needs a pick or a \"none found\" note first:\n" + '\n'.join('  - ' + g for g in gaps))
@@ -1448,6 +1504,7 @@ def apply_checkpoint(run, dropped, source='checkpoint', evidence=None):
         items = checkpoint.build_items(d, ROOT / run)
         valid = {i['id']: i for i in items}
         dropped = list(dict.fromkeys(dropped))
+        if 'brief' in dropped: die(3, 'Refused: the field brief cannot be dropped. It is the rule set for this run.')
         unknown = [x for x in dropped if x not in valid]
         if unknown: die(3, f"Refused: unknown item(s) {', '.join(checkpoint.clean(x, 40) for x in unknown)}.")
         drop_nodes = {x[5:] for x in dropped if x.startswith('node:')}
@@ -1672,7 +1729,8 @@ def cmd_grow(a):
 # ---- run log: .graph/runs/<id>/log.jsonl, append-only, one JSON line per command call ----
 LOG_ARGS = ('project_dir', 'text', 'note', 'why', 'skills', 'plugins', 'clis', 'mcp', 'task_text', 'auto_approve', 'skip_context', 'skip_preflight', 'goal', 'no_check', 'status', 'depends_on', 'check', 'target', 'risk', 'reason', 'command', 'type', 'needs', 'refresh',
             'with_accounts', 'include_dependents', 'skip_budget', 'left_pct', 'resets', 'from_level', 'not_before', 'host', 'session', 'needs', 'effort', 'model',
-            'part', 'query', 'url', 'mentions', 'pick', 'use', 'kind', 'ok', 'set', 'argv', 'where', 'no_sandbox', 'size', 'main', 'name', 'serve', 'terminal', 'no_open', 'open', 'background', 'wait', 'stop', 'serve_child', 'package', 'path')
+            'part', 'query', 'url', 'mentions', 'pick', 'use', 'kind', 'ok', 'set', 'argv', 'where', 'no_sandbox', 'size', 'main', 'name', 'serve', 'terminal', 'no_open', 'open', 'background', 'wait', 'stop', 'serve_child', 'package', 'path',
+            'field', 'sources', 'fresh', 'windows', 'landmark_ok', 'evidence', 'safety', 'review', 'date', 'date_source', 'title', 'landmark', 'level', 'complaint', 'close', 'partial')
 
 def log_path(run_id): return ROOT / run_id / 'log.jsonl'
 
@@ -1745,7 +1803,11 @@ def main():
     ap=argparse.ArgumentParser();sp=ap.add_subparsers(required=True)
     x=sp.add_parser('init');x.add_argument('task');x.add_argument('--id');x.add_argument('--host');x.add_argument('--max-retries',type=int,default=2);x.add_argument('--quality-command',action='append');x.add_argument('--skip-preflight',metavar='REASON');x.add_argument('--skip-context',metavar='REASON');x.add_argument('--auto-approve',metavar='WORDS');x.add_argument('--skip-budget',metavar='REASON');x.add_argument('--size',choices=list(SIZES),required=True);x.set_defaults(fn=cmd_init)
     x=sp.add_parser('node');x.add_argument('run');x.add_argument('node');x.add_argument('--role',required=True);x.add_argument('--status',required=True);x.add_argument('--depends-on',nargs='*');x.add_argument('--model');x.add_argument('--needs');x.add_argument('--effort');x.add_argument('--files',nargs='*');x.add_argument('--check');x.add_argument('--no-check',dest='no_check',metavar='REASON');x.add_argument('--target');x.add_argument('--risk');x.add_argument('--goal');x.add_argument('--reason');x.add_argument('--check-timeout',type=int,default=300);x.set_defaults(fn=cmd_node,nolock=True)
-    x=sp.add_parser('brief');x.add_argument('run');x.add_argument('node');x.set_defaults(fn=cmd_brief,nolock=True)
+    x=sp.add_parser('brief');x.add_argument('run_pos',nargs='?',metavar='run');x.add_argument('node',nargs='?');x.add_argument('--run');x.add_argument('--field');x.add_argument('--sources');x.add_argument('--fresh');x.add_argument('--windows');x.add_argument('--landmark-ok',dest='landmark_ok',choices=['yes','no']);x.add_argument('--evidence');x.add_argument('--safety');x.add_argument('--review');x.set_defaults(fn=cmd_brief,nolock=True)
+    x=sp.add_parser('source');x.add_argument('--run',required=True);x.add_argument('--url',required=True);x.add_argument('--type',required=True);x.add_argument('--date');x.add_argument('--date-source',dest='date_source',required=True,choices=list(research.DATE_SOURCES));x.add_argument('--title',required=True);x.add_argument('--landmark',action='store_true');x.add_argument('--why');x.add_argument('--level',choices=list(research.LEVELS));x.set_defaults(fn=cmd_source)
+    x=sp.add_parser('gap');x.add_argument('--run',required=True);x.add_argument('--complaint',required=True);x.add_argument('--sources',required=True);x.add_argument('--feature');x.set_defaults(fn=cmd_gap)
+    x=sp.add_parser('claim');x.add_argument('--run',required=True);x.add_argument('--text',required=True);x.add_argument('--sources',required=True);x.set_defaults(fn=cmd_claim)
+    x=sp.add_parser('research');x.add_argument('--run',required=True);x.add_argument('--close',action='store_true');x.add_argument('--partial');x.set_defaults(fn=cmd_research)
     x=sp.add_parser('verify-plan');x.add_argument('run');x.add_argument('node');x.set_defaults(fn=cmd_verify_plan,nolock=True)
     x=sp.add_parser('next');x.add_argument('run');x.set_defaults(fn=cmd_next,nolock=True)
     x=sp.add_parser('event');x.add_argument('run');x.add_argument('type');x.add_argument('message');x.set_defaults(fn=cmd_event)
@@ -1787,6 +1849,7 @@ def main():
     a=ap.parse_args()
     try: sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception: pass
+    if hasattr(a,'run_pos'): a.run=a.run or a.run_pos
     run_id=getattr(a,'run',None)
     if run_id: check_run_id(run_id)
     code=0

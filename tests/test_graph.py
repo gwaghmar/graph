@@ -1,5 +1,6 @@
 import json, os, subprocess, sys, tempfile, unittest
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent)); import briefhelp  # noqa: E402
 
 GRAPH = str(Path(__file__).resolve().parent.parent / 'skills' / 'graph' / 'scripts' / 'graph.py')
 
@@ -15,6 +16,9 @@ class GraphCase(unittest.TestCase):
         r = subprocess.run([sys.executable, GRAPH, *args], cwd=self.dir, capture_output=True,
                            text=True, encoding='utf-8')
         self.assertEqual(r.returncode, code, f'{args}: {r.stdout}{r.stderr}')
+        rid = briefhelp.init_run_id(args)
+        if rid and r.returncode == 0:
+            subprocess.run([sys.executable, GRAPH, *briefhelp.brief_cmd(rid)], cwd=self.dir, capture_output=True, text=True, encoding='utf-8')
         return r
 
     def init(self, *extra, preflight=False):

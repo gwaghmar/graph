@@ -1,5 +1,6 @@
 import contextlib, io, json, os, shutil, subprocess, sys, tempfile, time, unittest, urllib.error
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent)); import briefhelp  # noqa: E402
 from unittest import mock
 
 CORE = Path(__file__).resolve().parent.parent / 'skills' / 'graph' / 'scripts'
@@ -91,7 +92,10 @@ class Base(unittest.TestCase):
             try: graph.main(); rc = 0
             except SystemExit as e: rc = e.code if isinstance(e.code, int) else 0
         self.assertEqual(rc, code, f'{args}: {out.getvalue()}{err.getvalue()}')
-        return out.getvalue() + err.getvalue()
+        res = out.getvalue() + err.getvalue()
+        rid = briefhelp.init_run_id(args)
+        if rid and rc == 0: self.cli(*briefhelp.brief_cmd(rid))
+        return res
 
     def init(self, *extra, auto=False):
         a = ['init', 'task', '--id', 'r1', '--skip-preflight', 't', '--skip-context', 't', '--skip-budget', 't', *extra]

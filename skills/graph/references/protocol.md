@@ -159,3 +159,14 @@ Queue item: `{id, experiment, channel, handle, kind post|reply|video|listing_edi
 `video-check <file> [--thumb png]`: the file exists and `ffprobe` shows a duration above 0; without `ffprobe`, size above 0. `ffmpeg` writes the thumbnail when present. Use it as the check of the render node.
 
 `report` shows every number with source and date, the same-weekday comparison and the prior trend, "moved with" for experiments, "not enough data to decide" where it applies, and the unknowns by name.
+
+## Field brief and research mode
+
+State: `field_brief` (field, sources, fresh, windows, landmark_ok, evidence, safety, review) and `research` (sources, gaps, claims, started, closed). Commands: `brief --run`, `source`, `gap`, `claim`, `research --close [--partial]`. Each command and each refusal is one line in `log.jsonl`. Exit 2 is bad input. Exit 3 is a refused rule.
+
+- Approve (and the checkpoint GO) is refused for medium and large runs without a brief.
+- Windows are days per source type. `any` means no limit and allows undated. `default` covers types not listed. A type with no window is refused.
+- Once a source call has run (even a refused one), the windows and the landmark rule cannot change.
+- Date rules: undated needs a window of `any`. Older than the window needs `--landmark --why` and landmark-ok yes. Landmarks are labeled.
+- A gap with fewer than 2 source ids is WEAK. Unknown source ids are refused.
+- Close: research plans (a node with role research, or any source recorded) need 5 valid sources and cited gaps and claims, or `--partial`. Nothing is fetched by these commands. Links lose any user info, fragment and secret-looking query values.

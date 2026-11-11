@@ -64,6 +64,10 @@ def build_items(d, run_dir):
                       'why': ' · '.join(b for b in bits if b) or ('picked' if pk else 'top find'), 'badge': badge, 'more': max(len(top) - 1, 0), 'locked': False})
     for f in d.get('features', []):
         items.append({'id': 'feat:' + f['id'], 'kind': 'feature', 'part': 'Feature people want', 'title': clean(f.get('name')), 'why': clean(f.get('why'), 70), 'badge': None, 'more': 0, 'locked': False})
+    if d.get('field_brief'):
+        import research
+        t, w = research.card(d)
+        items.append({'id': 'brief', 'kind': 'brief', 'part': 'Field brief', 'title': t, 'why': w, 'badge': None, 'more': 0, 'locked': True})
     if d.get('campaign'):
         import growth
         try: items += growth.checkpoint_cards(d['campaign'])

@@ -4,6 +4,13 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added (field brief and research mode)
+- `brief --run <id> --field ...`: a short field brief the model writes from today's sources (no per-field code or lists). Required before approve on medium and large runs. One locked card on the checkpoint.
+- `source`: date checked against the brief's window per source type with the runtime's own clock. Undated and too old are refused. Landmarks need `--landmark --why` and a brief with landmark-ok yes, and are labeled.
+- `gap` (weak under 2 sources), `claim`, and `research --close` (5 valid sources and cited gaps and claims, or `--partial "<reason>"`).
+- Summary and report: sources table, evidence levels, the brief, who should check, and safety lines at the top.
+- SKILL.md: a short "Any field" section.
+
 ### Added (growth mode)
 - `grow`: campaigns with one ordinary graph run per cycle. Experiments with a state machine enforced in code (one change, dated baseline before the change, one live experiment per metric and surface, no decision before the window end, below `min_sample` only inconclusive, stale or unknown readings cannot support a decision, a revert needs a `revert_ref` and a logged undo).
 - Metrics ladder: public numbers, the user's CLI or MCP, a CSV in `inbox/`, or typed. Unknown is a value, never 0. Every reading has a source, a method and a date.

@@ -108,6 +108,8 @@ In normal use the agent runs these for you. Type `/graph <task>` on Claude Code,
 | `finish <run> --status complete\|failed` | Close the run |
 | `resume` | Continue the latest open run |
 | `status`, `tree`, `summary`, `render`, `event` | Reports and run log |
+| `brief --run <id> --field ...` | Field brief: field, best sources today, freshness rule, age windows per source type, landmark rule, evidence standard, safety lines, who should check. Required before approve on medium and large runs. Shown as one card on the checkpoint. |
+| `source`, `gap`, `claim`, `research --close` | Research mode. `source` checks the date against the brief's window with the runtime's own clock (undated and too old are refused, landmarks need the brief's yes). `research --close` needs 5 valid sources and cited gaps and claims, or `--partial "<reason>"`. The report shows the sources table, evidence levels, safety lines and who should check. |
 | `grow init\|channel\|source\|read\|exp\|queue\|post\|video-check\|video-done\|tick\|brief\|report` | Growth mode: a campaign with one graph run per cycle, experiments with enforced rules, a permission queue for anything that posts (content-hash approval, 72 hour expiry, no auto-approve), a posting ladder, and video by code. The runtime records and gates; the model posts with host tools. See `references/protocol.md` |
 
 ## Start: read the user, pick tools, agree the plan

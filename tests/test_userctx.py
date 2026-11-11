@@ -1,5 +1,6 @@
 import json, os, re, subprocess, sys, tempfile, time, unittest
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent)); import briefhelp  # noqa: E402
 
 CORE = Path(__file__).resolve().parent.parent / 'skills' / 'graph' / 'scripts'
 GRAPH = str(CORE / 'graph.py')
@@ -39,6 +40,9 @@ class Base(unittest.TestCase):
         r = subprocess.run([sys.executable, GRAPH, *args], cwd=self.proj, capture_output=True, text=True,
                            encoding='utf-8', env=self.env())
         self.assertEqual(r.returncode, code, f'{args}: {r.stdout}{r.stderr}')
+        rid = briefhelp.init_run_id(args)
+        if rid and r.returncode == 0:
+            subprocess.run([sys.executable, GRAPH, *briefhelp.brief_cmd(rid)], cwd=self.proj, capture_output=True, text=True, encoding='utf-8', env=self.env())
         return r
 
     def init(self, *extra, rid='r1'):
