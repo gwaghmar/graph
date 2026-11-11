@@ -4,6 +4,13 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added (capability tiers)
+- Route by capability tier, not model name: `node --needs deep|build|quick --effort low|medium|high`, derived from the role when omitted. `--model` stays as a logged manual override.
+- `models [--refresh] [--host]` and `resolve <run> <node>`: user `tiers.json` first, then the Codex or OpenCode catalog (cached 24 hours) or Claude Code aliases from `scripts/capabilities.json`, ranked with models.dev. Unknown means "host default, routing not applied".
+- High risk never routes below its tier, the last allowed attempt goes one tier up (`brief` says so), and `export-workflow` writes `model` and `effort` into each agent.
+- The summary has a "Model routing" table that compares the tier asked, the value resolved and the model that ran.
+- The models.dev price cache also keeps `reasoning` and `tool_call` flags.
+
 ### Added (token ledger)
 - `usage --run <id>` reads real token use from Claude Code transcripts (with subagents) and Codex sessions, by node and by model, with cost at API prices. `finish` adds it to the summary and fails soft to unknown.
 - `prices [--refresh]` with a shipped `scripts/prices.json` snapshot and a 30-day cache in `~/.cache/graph-skill/`.

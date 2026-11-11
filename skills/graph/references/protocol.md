@@ -7,7 +7,9 @@
 - `tools --run <id> --task "<text>"` ranks enabled skills and plugins by word overlap between the task and name plus description (no AI), prints the top 8, the CLI and MCP pick per need from `jobs.json`, and lists strong matches that are turned off.
 - `choose --run <id> [--skills a,b] [--plugins p] [--clis gh,vercel] [--mcp x] --why "<one line>"` records the toolkit. Names not found on this machine are allowed and flagged. Names that are turned off are flagged.
 - `approve --run <id> --note "<what the user said>"` records approval with the user's words.
-- `node <run> <id> --role R --status S [--depends-on ...] [--files ...] [--goal G] [--check CMD] [--target T] [--risk R] [--check-timeout S]` records a node.
+- `node <run> <id> --role R --status S [--depends-on ...] [--files ...] [--goal G] [--check CMD] [--target T] [--risk R] [--needs deep|build|quick] [--effort low|medium|high] [--model M] [--check-timeout S]` records a node. `--model` is a manual override: it is logged and noted in the report.
+- `models [--refresh] [--host auto|all|<host>] [--run <id>]` prints tier -> value per host with the source and data age. `--refresh` refetches models.dev and the host catalog.
+- `resolve <run> <node> [--host auto]` prints the host value for the node on its next attempt (line 1), then tier, source and notes. It stores the route on the node and logs it.
 - `brief <run> <node>` prints a fresh-context retry brief: goal, check, failing output tail, git diff --stat, attempt n of max.
 - `verify-plan <run> <node>` prints the verification steps this machine supports for the node target, cheapest first.
 - `next <run>` lists ready nodes, or `none`.
@@ -60,7 +62,7 @@ Targets: web, phone, desktop, api, data, none. Risk: low or high.
 Listing stops at the first step the machine lacks, with a one-line workaround. High-risk nodes escalate one step after step 1 passes. Data comes from the cached preflight scan.
 
 ## Plan fields
-id, role, depends_on, files, goal (required), check, target, risk. Keep nodes small. Split by independent file scope.
+id, role, depends_on, files, goal (required), check, target, risk, needs, effort. Keep nodes small. Split by independent file scope.
 
 ## Files
 When a node goes to running, the runtime stores a git snapshot (HEAD, changed files and their mtimes). On complete or failed it records the files that changed since (new commits, edits, untracked files) into the node, plus any `--files`. Parallel nodes may share attributions. Without git, nothing is recorded and nothing fails.
@@ -75,6 +77,16 @@ When a node goes to running, the runtime stores a git snapshot (HEAD, changed fi
 `usage.py` collects usage between the run's `created_at` and `finished_at` (or now) for the current project. Claude Code: `~/.claude/projects/<slug>/*.jsonl` and `<session>/subagents/agent-*.jsonl`, deduped on `message.id` (else `requestId`), the last line of a message wins. Codex: `~/.codex/sessions/**/rollout-*.jsonl`, deltas of `total_token_usage` for sessions whose cwd is the project, model from `turn_context`. Other hosts: unknown. Only numbers, model ids, timestamps and ids are read.
 Main-session usage is `orchestrator`. A subagent goes to the one node whose time span overlaps it, `shared` if it overlaps 2 or more, `unattributed` if none. Reasoning tokens are part of output.
 Prices: `scripts/prices.json` (snapshot of models.dev, providers anthropic, openai, google). `prices --refresh` writes `~/.cache/graph-skill/prices.json`. The cache is used if under 30 days old, else the snapshot. Ids match exactly, then without a date suffix. An unknown model shows tokens and cost n/a. The result is stored in `state.json` under `usage` and shown in the summary. `finish` fails soft to unknown.
+
+## Capability tiers
+Plans name a capability, never a model: `deep` (design, review, root cause, security, migration), `build` (implement, fix, refactor, test), `quick` (lookup, rename, config, list). `--needs` sets it. Without it the tier comes from the role, through `ROLE_TIER` in `routing.py` (one table; unknown roles use build). `--effort` is low, medium or high.
+Values per host, highest priority first:
+1. `~/.config/graph-skill/tiers.json`, `{"<host>": {"deep": "<value>", "build": "...", "quick": "..."}}`, host is `claude-code`, `codex`, `opencode` or `cursor`. It wins per tier. Values must be plain ids (letters, digits, `. : / @ + [ ] -`).
+2. The host catalog. Codex: `codex debug models` (JSON; entries with a `visibility` other than `list` are skipped). OpenCode: `opencode models --verbose`. Both cached 24 hours in `~/.cache/graph-skill/catalog-<host>.json` (ids and capability numbers only). Claude Code has no catalog: its aliases are data in `scripts/capabilities.json`.
+3. models.dev data (the prices cache, or `models --refresh`) ranks the catalog models by output price. deep is the highest price with reasoning true. quick is the lowest price with tool calling. build is the median-priced reasoning model (lower median); with two models it is the cheaper one, with one it is deep. A model with no price is not ranked. If nothing can be ranked the value is "host default, routing not applied".
+`resolve` prints, per host: Claude Code `model=<alias> [effort=<x>]` (the Agent tool options), Codex `-m <slug> -c model_reasoning_effort=<x>` (the requested effort if the model supports it, else the model default), OpenCode `--model <provider/model>`, Cursor and unknown `host default`.
+Rules in code: a missing tier falls back upward first; high risk never falls back downward. `node` refuses (exit 3) a high-risk node whose `--needs` is below its role's tier. The last allowed attempt after retries (needs `--max-retries` 1 or more) goes one tier up, and `brief` says so; a deep node gets effort high. `--needs` and `--effort` lock when planning ends. `plan_hash` includes `--needs` when set. `export-workflow` writes `model` and `effort` into each `agent()` options from the Claude Code values.
+Report: `summary.md` has a "Model routing" table per node: tier asked, value resolved, model that ran (from the token ledger), and flags for MISMATCH, escalation, manual override and "not applied".
 
 ## Second end-to-end fixes
 

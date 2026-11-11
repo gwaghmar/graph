@@ -87,6 +87,8 @@ In normal use the agent runs these for you. Type `/graph <task>` on Claude Code,
 | `next <run>` | List ready nodes |
 | `usage --run id [--host auto] [--session id] [--project-dir dir]` | Read real token use from the host's own files for this run, by node and by model, with cost at API prices. `finish` does this for you |
 | `prices [--refresh] [--run id]` | Show the price list in use. `--refresh` downloads a new one to `~/.cache/graph-skill/prices.json` |
+| `models [--refresh] [--host auto\|all\|H] [--run id]` | Show what deep, build and quick mean on each host, with source and data age |
+| `resolve <run> <node> [--host auto]` | Host-specific value for a node (Claude Code options, Codex flags, OpenCode `--model`), logged |
 | `brief <run> <node>` | Fresh-context retry brief |
 | `verify-plan <run> <node>` | Verification steps this machine supports |
 | `quality <run> [--command C]` | Run lint, type and test checks |
@@ -114,6 +116,10 @@ Honest limit: the runtime cannot prove that an approval came from a human. It on
 Token ledger: `usage` reads usage numbers, model ids, timestamps and ids from Claude Code transcripts (`~/.claude/projects/<project>/`, including subagent files) and Codex sessions (`~/.codex/sessions/`). It never reads message content, secrets or tokens. Cost is the API-price equivalent. On a subscription you pay your plan, not this. Other hosts show tokens as unknown. `finish` adds the table to the summary and appends one line per finished node (date, host, role, tokens, duration) to `~/.config/graph-skill/history.jsonl`.
 
 Privacy: `context` and `tools` print file names, dates and skill names with short descriptions only. They never print file bodies or env values, and home paths show as `~`.
+
+## Routing by capability tier
+
+Plans never name a model. Each node asks for a tier with `--needs deep|build|quick` (and `--effort low|medium|high`), or the runtime derives it from the role. `resolve` turns the tier into a value for the current host. Order: your own `~/.config/graph-skill/tiers.json`, then the host's model catalog (Codex, OpenCode) or the aliases in `scripts/capabilities.json` (Claude Code), with models.dev prices used to rank catalog models. If nothing is known it says "host default, routing not applied". High-risk nodes never route below their tier. The last allowed attempt goes one tier up. The summary shows tier asked, value resolved and the model that really ran, and flags mismatches.
 
 ## Logging
 

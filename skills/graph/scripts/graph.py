@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from preflight import run_proc
-import userctx, usage
+import userctx, usage, routing
 
 ROOT = Path('.graph/runs')
 STATUSES = ('pending', 'running', 'retrying', 'complete', 'failed', 'skipped', 'cached')
@@ -14,7 +14,7 @@ DONE = ('complete', 'cached', 'skipped')
 RUN_ID = re.compile(r'^[A-Za-z0-9_-]+$')
 
 # What the current command did, collected for the run log (see write_log).
-CTX = {'msg': None, 'checks': [], 'run': None, 'preflight': None}
+CTX = {'msg': None, 'checks': [], 'run': None, 'preflight': None, 'route': None}
 
 def die(code, msg):
     CTX['msg'] = msg
@@ -142,6 +142,10 @@ def field_problems(n):
         out.append(f"{n['id']}: target must be one of {', '.join(TARGETS)}")
     if n.get('risk') is not None and n['risk'] not in RISKS:
         out.append(f"{n['id']}: risk must be one of {', '.join(RISKS)}")
+    if n.get('needs') is not None and n['needs'] not in routing.TIERS:
+        out.append(f"{n['id']}: needs must be one of {', '.join(reversed(routing.TIERS))}")
+    if n.get('effort') is not None and n['effort'] not in routing.EFFORTS:
+        out.append(f"{n['id']}: effort must be one of {', '.join(routing.EFFORTS)}")
     return out
 
 def tail_lines(text, n=40):
@@ -181,7 +185,7 @@ def preflight_done(d):
 
 def plan_hash(d):
     """Fingerprint of the plan: node ids, dependencies, goals and checks."""
-    rows = sorted((n['id'], sorted(n.get('depends_on', [])), (n.get('goal') or '').strip(), n.get('check') or '') for n in d.get('nodes', []))
+    rows = sorted((n['id'], sorted(n.get('depends_on', [])), (n.get('goal') or '').strip(), n.get('check') or '') + ((n['needs'],) if n.get('needs') else ()) for n in d.get('nodes', []))
     return hashlib.sha256(json.dumps(rows, ensure_ascii=True).encode('utf-8')).hexdigest()[:16]
 
 def start_gaps(d):
@@ -277,6 +281,9 @@ def guard(a, d, n):
         die(3, f"Refused: dependencies of {a.node} are locked once planning ends. Set them with --status pending before the first node runs.")
     if n is not None and a.check is not None and a.check != n.get('check') and not planning_call:
         die(3, f"Refused: the check of {a.node} is locked once planning ends. Set it with --status pending before the first node runs.")
+    for fld in ('needs', 'effort'):
+        if n is not None and getattr(a, fld) is not None and getattr(a, fld) != n.get(fld) and not planning_call:
+            die(3, f"Refused: --{fld} of {a.node} is locked once planning ends. Set it with --status pending before the first node runs.")
     if n is not None and a.no_check is not None and a.no_check.strip() != (n.get('no_check') or '') and not planning_call:
         die(3, f"Refused: --no-check of {a.node} is locked once planning ends.")
     if a.status != 'pending':
@@ -291,12 +298,17 @@ def guard(a, d, n):
 def cmd_node(a):
     if a.status not in STATUSES: die(2, f"Invalid status '{a.status}'. Use one of: {', '.join(STATUSES)}.")
     if a.check_timeout < 1: die(2, '--check-timeout must be 1 or more.')
-    new = {'id': a.node, 'check': a.check, 'target': a.target, 'risk': a.risk}
+    new = {'id': a.node, 'check': a.check, 'target': a.target, 'risk': a.risk, 'needs': a.needs, 'effort': a.effort}
     if a.no_check is not None and not a.no_check.strip(): die(2, '--no-check needs a reason.')
     bad = field_problems(new)
     if bad: die(2, f"Bad plan field: {bad[0]}.")
     _, d0 = load(a.run)
     n0 = get_node(d0, a.node)
+    risk, needs = a.risk or (n0 or {}).get('risk'), a.needs or (n0 or {}).get('needs')
+    if risk == 'high' and needs:
+        floor = routing.ROLE_TIER.get(a.role.lower(), routing.DEFAULT_TIER)
+        if routing.TIERS.index(needs) < routing.TIERS.index(floor):
+            die(3, f"Refused: {a.node} is high risk, so it cannot route below {floor} (its role {a.role!r}). Use --needs {floor} or deep, or lower the risk with a reason.")
     guard(a, d0, n0)
     cmd = (n0 or {}).get('check')
     result = run_check(cmd, a.check_timeout) if a.status == 'complete' and cmd else None
@@ -315,8 +327,9 @@ def apply_node(a, result):
     previous = None if created else n.get('status')
     if created: d['nodes'].append(n)
     n.update({k: v for k, v in {'role': a.role, 'status': a.status, 'model': a.model, 'check': a.check, 'no_check': (a.no_check or '').strip() or None,
-                                'target': a.target, 'risk': a.risk, 'goal': (a.goal or '').strip() or None, 'skip_reason': a.reason}.items() if v is not None})
+                                'target': a.target, 'risk': a.risk, 'needs': a.needs, 'effort': a.effort, 'goal': (a.goal or '').strip() or None, 'skip_reason': a.reason}.items() if v is not None})
     n['depends_on'] = deps
+    n['tier'], n['tier_by'] = routing.tier_of(n)
     if a.files: n['files'] = sorted(set(n.get('files', []) + a.files))
     if a.status in ('running', 'retrying') and previous not in ('running', 'retrying'):
         n['attempts'] = n.get('attempts', 0) + 1
@@ -361,6 +374,10 @@ def cmd_brief(a):
     if n.get('check_output'):
         out += [f"Last check exit code: {n.get('check_exit')}", 'Failing output (tail):', n['check_output']]
     else: out.append('No failing output recorded.')
+    tier, _ = routing.tier_of(n); cur, lim, last = routing.attempt_info(d, dict(n, status='failed'))
+    out.append(f"Tier: {tier}" + (f", effort {n['effort']}" if n.get('effort') else ''))
+    if last: out.append(f"ESCALATION: this is the last allowed attempt, so route it one tier up ({tier} -> {routing.up(tier)}). Run: {graph_cmd()} resolve {a.run} {n['id']} and pass the value to the host.")
+    else: out.append(f"Route it with: {graph_cmd()} resolve {a.run} {n['id']}")
     if n.get('files'): out.append('Files recorded for this node: ' + ', '.join(n['files']))
     if shutil.which('git'):
         try:
@@ -639,6 +656,7 @@ def build_summary(d):
     if not checks and not any(l.startswith('- Node') for l in L[L.index('## What was checked'):]): L.append('- No check ran.')
     L+=['','## How it ran','',parallel_line(d)]
     L+=['','## Tokens and cost','']+usage.report_lines(d['usage'] if 'usage' in d else None)
+    L+=['','## Model routing','']+routing.report_lines(d)
     L+=['','## What failed','']
     out=failure_history(d)
     out+=[f"- Node {n['id']} is failed now, after {n.get('attempts',0)} attempt(s)." + (f" Check exit was {n['check_exit']}." if n.get('check_exit') not in (None,0) else '') for n in failed
@@ -845,6 +863,15 @@ def cmd_export_workflow(a):
                   f"If you cannot finish, run: {mark(n, 'failed')}",
                   'Reply with ok true only if the complete command succeeded, else ok false with a short summary.']
         return '\n'.join(lines)
+    routes = {}
+    for n in nodes:
+        r = routing.route(d, n, 'claude-code', Path.home())
+        routes[n['id']] = r
+    def opts(n):
+        r = routes[n['id']]; extra = ''
+        if r['value']: extra += f", model: {js(r['value'])}"
+        if r['effort']: extra += f", effort: {js(r['effort'])}"
+        return f"{{ label: {js(n['id'])}, schema{extra} }}"
     title = lambda i: f'Level {i + 1}'
     phases = ',\n'.join(f'    {{ title: {js(title(i))}, detail: {js(", ".join(n["id"] for n in by[k]))} }}' for i, k in enumerate(sorted(by)))
     out = [f'// Graph run {a.run}: this script belongs to that run only. For a new task, create a new run and export again.',
@@ -858,7 +885,7 @@ def cmd_export_workflow(a):
         out += [f"await agent({js('Run: ' + g + ' preflight --run ' + shlex.quote(a.run) + ' --needs <what this task needs, for example github,deploy>. Read the summary it prints. Reply ok true when it ran.')}, {{ label: 'preflight', schema }})", '']
     for i in sorted(by):
         out += [f'if (!stopped) {{', f'  phase({js(title(i))})', '  const results = await parallel([']
-        out += [f"    () => agent({js(prompt(n))}, {{ label: {js(n['id'])}, schema }})," for n in by[i]]
+        out += [f"    () => agent({js(prompt(n))}, {opts(n)})," for n in by[i]]
         out += ['  ])', '  const bad = results.findIndex(r => r === null || !r.ok)', '  if (bad !== -1) {',
                 f'    log("Node failed or returned nothing at {title(i)}. Stopping so dependents do not start.")',
                 f"    await agent({js('Run: ' + g + ' finish ' + shlex.quote(a.run) + ' --status failed')}, {{ label: 'mark-failed' }})",
@@ -867,6 +894,12 @@ def cmd_export_workflow(a):
     path = Path(a.out) if a.out else Path('.claude/workflows') / f'graph-{a.run}.js'
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text('\n'.join(out), encoding='utf-8')
+    CTX['route'] = {k: v['text'] for k, v in routes.items()}
+    with run_lock(a.run):
+        p, d2 = load(a.run)
+        for n2 in d2['nodes']:
+            if n2['id'] in routes: n2.setdefault('routes', []).append(routing.keep(routes[n2['id']])); n2['routes'] = n2['routes'][-10:]
+        d2['updated_at'] = now(); save(p, d2)
     print(f'Wrote {path}: {len(nodes)} agents in {len(by)} levels. Run it with the Workflow tool.')
 
 def cmd_retry_plan(a):
@@ -932,6 +965,46 @@ def cmd_prices(a):
         print(f'Prices refreshed: {count} models, saved to ~/.cache/graph-skill/prices.json.')
     table,as_of,where,age=usage.load_prices(home)
     print(f"Prices in use: {where}, as of {as_of}"+(f' ({age} days old)' if age is not None else '')+f", {len(table)} models. {usage.LABEL}")
+
+def resolve_host(a, d):
+    h = a.host if a.host and a.host != 'auto' else (d.get('host_detected') if d else None) or (d.get('host') if d else None)
+    return routing.canon_host(h) if h else 'unknown'
+
+def cmd_resolve(a):
+    p, d = load(a.run)
+    n = get_node(d, a.node) or die(2, f'Unknown node: {a.node}. Check the node id.')
+    host = resolve_host(a, d)
+    r = routing.route(d, n, host, Path.home())
+    kept = routing.keep(r)
+    n.setdefault('routes', []).append(kept); n['routes'] = n['routes'][-10:]
+    n['tier'], n['tier_by'] = routing.tier_of(n)
+    d['updated_at'] = now(); save(p, d)
+    CTX['route'] = kept
+    print(tilde(routing.describe(r)))
+
+def cmd_models(a):
+    home = Path.home()
+    d = None
+    if a.run: _, d = load(a.run)
+    if a.refresh:
+        count, err = usage.refresh_prices(home)
+        print(f'models.dev refreshed: {count} models.' if not err else f'Could not refresh models.dev ({err}). The old data stays in use.')
+    if a.host == 'all': hosts = list(routing.HOSTS)
+    else:
+        h = resolve_host(a, d) if a.host in (None, 'auto') else routing.canon_host(a.host)
+        if a.host in (None, 'auto') and h == 'unknown':
+            import preflight
+            h = routing.canon_host(preflight.safe(lambda: preflight.detect_host(os.environ, Path.cwd(), home), 'unknown'))
+        hosts = [h] if h != 'unknown' else list(routing.HOSTS)
+    for h in hosts:
+        tv = routing.tier_values(h, home, refresh=a.refresh)
+        print(f'{h}:')
+        for t in reversed(routing.TIERS):
+            e = tv['tiers'].get(t)
+            print(f"  {t:<5} -> " + (f"{e['value']}  [{e['source']}]" if e else routing.NOT_APPLIED if h not in ('cursor', 'unknown') else 'host default'))
+        for x in tv['data']: print(f'  data: {x}')
+        for x in tv['notes']: print(f'  note: {tilde(x)}')
+    CTX['route'] = {'hosts': hosts}
 
 def cmd_tree(a):
     _,d=load(a.run); print(ascii_graph(d))
@@ -1019,7 +1092,7 @@ def cmd_preflight(a):
 
 # ---- run log: .graph/runs/<id>/log.jsonl, append-only, one JSON line per command call ----
 LOG_ARGS = ('project_dir', 'text', 'note', 'why', 'skills', 'plugins', 'clis', 'mcp', 'task_text', 'auto_approve', 'skip_context', 'skip_preflight', 'goal', 'no_check', 'status', 'depends_on', 'check', 'target', 'risk', 'reason', 'command', 'type', 'needs', 'refresh',
-            'with_accounts', 'include_dependents', 'host', 'session')
+            'with_accounts', 'include_dependents', 'host', 'session', 'needs', 'effort', 'model')
 
 def log_path(run_id): return ROOT / run_id / 'log.jsonl'
 
@@ -1056,14 +1129,16 @@ def write_log(a, code):
         if code != 0: e['message'] = clip(CTX['msg'] or f'exit {code}')
         if CTX['checks']: e['checks'] = CTX['checks']
         if CTX['preflight']: e['preflight'] = CTX['preflight']
+        if CTX['route']: e['routing'] = CTX['route']
         append_log(rid, e)
-        if outcome != 'ok' or cmd not in ('render', 'status', 'tree', 'summary', 'next', 'brief', 'validate', 'retry-plan', 'verify-plan'):
+        if outcome != 'ok' or cmd not in ('render', 'status', 'tree', 'summary', 'next', 'brief', 'validate', 'retry-plan', 'verify-plan', 'models'):
             p = ROOT / rid / 'state.json'; render_files(p, json.loads(p.read_text(encoding='utf-8')))
     except Exception: pass
 
 def describe(e):
     cmd, a = e.get('cmd', '?'), e.get('args') or {}
     if cmd == 'node': what = 'node -> ' + str(a.get('status', '?')) + (f" (check {a['check']})" if a.get('check') else '')
+    elif cmd == 'resolve': what = 'resolve -> ' + str((e.get('routing') or {}).get('text', '?'))
     elif cmd == 'preflight': what = 'preflight' + (f" needs {a['needs']}" if a.get('needs') else '')
     else: what = cmd
     for c in e.get('checks') or []:
@@ -1089,7 +1164,7 @@ def cmd_log(a):
 def main():
     ap=argparse.ArgumentParser();sp=ap.add_subparsers(required=True)
     x=sp.add_parser('init');x.add_argument('task');x.add_argument('--id');x.add_argument('--host');x.add_argument('--max-retries',type=int,default=2);x.add_argument('--quality-command',action='append');x.add_argument('--skip-preflight',metavar='REASON');x.add_argument('--skip-context',metavar='REASON');x.add_argument('--auto-approve',metavar='WORDS');x.set_defaults(fn=cmd_init)
-    x=sp.add_parser('node');x.add_argument('run');x.add_argument('node');x.add_argument('--role',required=True);x.add_argument('--status',required=True);x.add_argument('--depends-on',nargs='*');x.add_argument('--model');x.add_argument('--files',nargs='*');x.add_argument('--check');x.add_argument('--no-check',dest='no_check',metavar='REASON');x.add_argument('--target');x.add_argument('--risk');x.add_argument('--goal');x.add_argument('--reason');x.add_argument('--check-timeout',type=int,default=300);x.set_defaults(fn=cmd_node,nolock=True)
+    x=sp.add_parser('node');x.add_argument('run');x.add_argument('node');x.add_argument('--role',required=True);x.add_argument('--status',required=True);x.add_argument('--depends-on',nargs='*');x.add_argument('--model');x.add_argument('--needs');x.add_argument('--effort');x.add_argument('--files',nargs='*');x.add_argument('--check');x.add_argument('--no-check',dest='no_check',metavar='REASON');x.add_argument('--target');x.add_argument('--risk');x.add_argument('--goal');x.add_argument('--reason');x.add_argument('--check-timeout',type=int,default=300);x.set_defaults(fn=cmd_node,nolock=True)
     x=sp.add_parser('brief');x.add_argument('run');x.add_argument('node');x.set_defaults(fn=cmd_brief,nolock=True)
     x=sp.add_parser('verify-plan');x.add_argument('run');x.add_argument('node');x.set_defaults(fn=cmd_verify_plan,nolock=True)
     x=sp.add_parser('next');x.add_argument('run');x.set_defaults(fn=cmd_next,nolock=True)
@@ -1105,6 +1180,8 @@ def main():
     x=sp.add_parser('finish');x.add_argument('run');x.add_argument('--status',default='complete',choices=['complete','failed']);x.set_defaults(fn=cmd_finish)
     x=sp.add_parser('usage');x.add_argument('--run',required=True);x.add_argument('--host',default='auto');x.add_argument('--session');x.add_argument('--project-dir',dest='project_dir');x.set_defaults(fn=cmd_usage)
     x=sp.add_parser('prices');x.add_argument('--run');x.add_argument('--refresh',action='store_true');x.set_defaults(fn=cmd_prices,nolock=True)
+    x=sp.add_parser('models');x.add_argument('--refresh',action='store_true');x.add_argument('--host',default='auto');x.add_argument('--run');x.set_defaults(fn=cmd_models,nolock=True)
+    x=sp.add_parser('resolve');x.add_argument('run');x.add_argument('node');x.add_argument('--host',default='auto');x.set_defaults(fn=cmd_resolve)
     x=sp.add_parser('status');x.add_argument('run');x.set_defaults(fn=cmd_status,nolock=True)
     x=sp.add_parser('log');x.add_argument('run');x.add_argument('--refusals',action='store_true');x.add_argument('--node');x.add_argument('--json',action='store_true');x.set_defaults(fn=cmd_log,nolock=True)
     x=sp.add_parser('context');x.add_argument('--run',required=True);x.add_argument('--project-dir',dest='project_dir');x.set_defaults(fn=cmd_context)

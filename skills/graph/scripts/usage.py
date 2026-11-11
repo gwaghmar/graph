@@ -63,6 +63,8 @@ def build_table(api):
             c = m.get('cost') if isinstance(m, dict) else None
             if isinstance(c, dict) and isinstance(c.get('input'), (int, float)) and isinstance(c.get('output'), (int, float)):
                 out[mid] = {'input': c['input'], 'output': c['output'], 'cache_read': c.get('cache_read') or 0, 'cache_write': c.get('cache_write') or 0}
+                for flag in ('reasoning', 'tool_call'):  # capability flags, used to rank models into tiers
+                    if isinstance(m.get(flag), bool): out[mid][flag] = m[flag]
     return dict(sorted(out.items()))
 
 def refresh_prices(home, url=None):
