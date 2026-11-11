@@ -85,6 +85,8 @@ In normal use the agent runs these for you. Type `/graph <task>` on Claude Code,
 | `node <run> <id> --role R --status S [...]` | Add or update a node, with rule checks |
 | `validate <run>` | Reject bad dependencies |
 | `next <run>` | List ready nodes |
+| `usage --run id [--host auto] [--session id] [--project-dir dir]` | Read real token use from the host's own files for this run, by node and by model, with cost at API prices. `finish` does this for you |
+| `prices [--refresh] [--run id]` | Show the price list in use. `--refresh` downloads a new one to `~/.cache/graph-skill/prices.json` |
 | `brief <run> <node>` | Fresh-context retry brief |
 | `verify-plan <run> <node>` | Verification steps this machine supports |
 | `quality <run> [--command C]` | Run lint, type and test checks |
@@ -108,6 +110,8 @@ Before any node runs, the agent follows this order:
 The first node start is refused (exit 3) until preflight, profile, choose and approve are recorded. The refusal lists exactly what is missing. Escape hatches, all logged: `init --skip-preflight "<reason>"`, `--skip-context "<reason>"` (hosts with no user files, waives profile and choose) and `--auto-approve "<the user's words>"` (the user already said to go ahead; task text or text without a go-ahead phrase is refused).
 
 Honest limit: the runtime cannot prove that an approval came from a human. It only records the text the agent passes. The log is a plain local file. The gates stop an agent from skipping steps by accident, not from lying.
+
+Token ledger: `usage` reads usage numbers, model ids, timestamps and ids from Claude Code transcripts (`~/.claude/projects/<project>/`, including subagent files) and Codex sessions (`~/.codex/sessions/`). It never reads message content, secrets or tokens. Cost is the API-price equivalent. On a subscription you pay your plan, not this. Other hosts show tokens as unknown. `finish` adds the table to the summary and appends one line per finished node (date, host, role, tokens, duration) to `~/.config/graph-skill/history.jsonl`.
 
 Privacy: `context` and `tools` print file names, dates and skill names with short descriptions only. They never print file bodies or env values, and home paths show as `~`.
 

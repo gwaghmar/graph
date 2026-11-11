@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added (token ledger)
+- `usage --run <id>` reads real token use from Claude Code transcripts (with subagents) and Codex sessions, by node and by model, with cost at API prices. `finish` adds it to the summary and fails soft to unknown.
+- `prices [--refresh]` with a shipped `scripts/prices.json` snapshot and a 30-day cache in `~/.cache/graph-skill/`.
+- Finished nodes are appended to `~/.config/graph-skill/history.jsonl` (date, host, role, tokens, duration).
+
 ### Fixed (second end-to-end test)
 - `--auto-approve` refuses task text and text with no go-ahead phrase.
 - `preflight --needs` accepts unknown needs and `none`.

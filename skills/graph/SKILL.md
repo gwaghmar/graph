@@ -52,6 +52,8 @@ Do these in order. The runtime refuses to start any node (exit 3) until prefligh
 
 On Claude Code with the Workflow tool, prefer `G export-workflow <run>` after `validate`. It writes `.claude/workflows/graph-<run>.js`, one agent per node, run level by level. The script belongs to that run, and it uses a project-relative script path when the skill is installed in the project. Each agent calls `G node` itself, so the gates still apply. Run that script with the Workflow tool instead of the loop above. The export is refused until the start steps are recorded.
 
+`G finish` also reads real token use from the host's own files and adds a table to the summary. It is the cost at API prices, not what a plan charges. Run `G usage --run <run>` to see it any time. Run `G prices --refresh` to update the price list. If usage cannot be read, the summary says unknown.
+
 Show the final summary to the user (`G summary <run>`). Other commands: `G status <run>`, `G tree <run>`, `G retry-plan <run> --include-dependents`, `G render <run>`, `G event <run> <type> <message>`.
 
 ## Rules

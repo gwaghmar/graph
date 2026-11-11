@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from preflight import run_proc
-import userctx
+import userctx, usage
 
 ROOT = Path('.graph/runs')
 STATUSES = ('pending', 'running', 'retrying', 'complete', 'failed', 'skipped', 'cached')
@@ -638,6 +638,7 @@ def build_summary(d):
         checks+=1; L.append(f"- Quality check `{x.get('command','')}`: {x.get('status','unknown')}.")
     if not checks and not any(l.startswith('- Node') for l in L[L.index('## What was checked'):]): L.append('- No check ran.')
     L+=['','## How it ran','',parallel_line(d)]
+    L+=['','## Tokens and cost','']+usage.report_lines(d['usage'] if 'usage' in d else None)
     L+=['','## What failed','']
     out=failure_history(d)
     out+=[f"- Node {n['id']} is failed now, after {n.get('attempts',0)} attempt(s)." + (f" Check exit was {n['check_exit']}." if n.get('check_exit') not in (None,0) else '') for n in failed
@@ -909,12 +910,28 @@ def cmd_finish(a):
         if bad: die(3,f"Refused: latest result of a required quality command failed ({'; '.join(bad)}). Fix it and run quality again, or use --status failed.")
         if not any(x.get('status')=='passed' for x in req.values()):
             status='complete-unverified'; print('No required quality check passed: run recorded as complete-unverified.')
+    d['usage']=usage.collect(d, Path.home(), Path.cwd())
+    with contextlib.suppress(Exception): usage.write_history(Path.home(), usage.history_entries(d, d['usage']))
     d['status']=status; d['finished_at']=now(); d['updated_at']=now()
     d['verify_steps']=verify_plans(d)
     d['access_gaps']=[f"Node {i} could not be fully verified: {a} is missing. Workaround: {c}." for i,st in d['verify_steps'].items() for a,b,c in st if b!='ok']
     save(p, d); render_files(p, d)
     text=build_summary(d); (p.parent/'summary.md').write_text(text, encoding='utf-8')
     print(text); print(f"Report: {p.parent/'graph.html'}")
+
+def cmd_usage(a):
+    p,d=load(a.run)
+    d['usage']=usage.collect(d, Path.home(), Path.cwd(), host=a.host if a.host and a.host!='auto' else None, session=a.session, project=a.project_dir)
+    d['updated_at']=now(); save(p,d); print('\n'.join(usage.report_lines(d['usage'])))
+
+def cmd_prices(a):
+    home=Path.home()
+    if a.refresh:
+        count,err=usage.refresh_prices(home)
+        if err: die(1,f'Could not refresh prices ({err}). The old prices stay in use.')
+        print(f'Prices refreshed: {count} models, saved to ~/.cache/graph-skill/prices.json.')
+    table,as_of,where,age=usage.load_prices(home)
+    print(f"Prices in use: {where}, as of {as_of}"+(f' ({age} days old)' if age is not None else '')+f", {len(table)} models. {usage.LABEL}")
 
 def cmd_tree(a):
     _,d=load(a.run); print(ascii_graph(d))
@@ -1002,7 +1019,7 @@ def cmd_preflight(a):
 
 # ---- run log: .graph/runs/<id>/log.jsonl, append-only, one JSON line per command call ----
 LOG_ARGS = ('project_dir', 'text', 'note', 'why', 'skills', 'plugins', 'clis', 'mcp', 'task_text', 'auto_approve', 'skip_context', 'skip_preflight', 'goal', 'no_check', 'status', 'depends_on', 'check', 'target', 'risk', 'reason', 'command', 'type', 'needs', 'refresh',
-            'with_accounts', 'include_dependents')
+            'with_accounts', 'include_dependents', 'host', 'session')
 
 def log_path(run_id): return ROOT / run_id / 'log.jsonl'
 
@@ -1086,6 +1103,8 @@ def main():
     x=sp.add_parser('tree');x.add_argument('run');x.set_defaults(fn=cmd_tree,nolock=True)
     x=sp.add_parser('summary');x.add_argument('run');x.set_defaults(fn=cmd_summary,nolock=True)
     x=sp.add_parser('finish');x.add_argument('run');x.add_argument('--status',default='complete',choices=['complete','failed']);x.set_defaults(fn=cmd_finish)
+    x=sp.add_parser('usage');x.add_argument('--run',required=True);x.add_argument('--host',default='auto');x.add_argument('--session');x.add_argument('--project-dir',dest='project_dir');x.set_defaults(fn=cmd_usage)
+    x=sp.add_parser('prices');x.add_argument('--run');x.add_argument('--refresh',action='store_true');x.set_defaults(fn=cmd_prices,nolock=True)
     x=sp.add_parser('status');x.add_argument('run');x.set_defaults(fn=cmd_status,nolock=True)
     x=sp.add_parser('log');x.add_argument('run');x.add_argument('--refusals',action='store_true');x.add_argument('--node');x.add_argument('--json',action='store_true');x.set_defaults(fn=cmd_log,nolock=True)
     x=sp.add_parser('context');x.add_argument('--run',required=True);x.add_argument('--project-dir',dest='project_dir');x.set_defaults(fn=cmd_context)

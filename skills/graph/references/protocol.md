@@ -71,6 +71,11 @@ When a node goes to running, the runtime stores a git snapshot (HEAD, changed fi
 ## Export
 `export-workflow` writes a script for one run (a comment at the top says so). It calls graph.py by a project-relative path when the skill is installed in `.claude/skills/graph` or `.agents/skills/graph`, else by absolute path. The launcher is `python3`, or `py -3` / `python` on Windows. If preflight is not yet logged, the script starts with a preflight step.
 
+## Token ledger
+`usage.py` collects usage between the run's `created_at` and `finished_at` (or now) for the current project. Claude Code: `~/.claude/projects/<slug>/*.jsonl` and `<session>/subagents/agent-*.jsonl`, deduped on `message.id` (else `requestId`), the last line of a message wins. Codex: `~/.codex/sessions/**/rollout-*.jsonl`, deltas of `total_token_usage` for sessions whose cwd is the project, model from `turn_context`. Other hosts: unknown. Only numbers, model ids, timestamps and ids are read.
+Main-session usage is `orchestrator`. A subagent goes to the one node whose time span overlaps it, `shared` if it overlaps 2 or more, `unattributed` if none. Reasoning tokens are part of output.
+Prices: `scripts/prices.json` (snapshot of models.dev, providers anthropic, openai, google). `prices --refresh` writes `~/.cache/graph-skill/prices.json`. The cache is used if under 30 days old, else the snapshot. Ids match exactly, then without a date suffix. An unknown model shows tokens and cost n/a. The result is stored in `state.json` under `usage` and shown in the summary. `finish` fails soft to unknown.
+
 ## Second end-to-end fixes
 
 - `init --auto-approve` is refused (exit 3, run still created without it) when the text is the task, part of it, or over 60% the same words, or has no go-ahead phrase (list: `GO_AHEAD` in `graph.py`).
