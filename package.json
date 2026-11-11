@@ -36,7 +36,8 @@
     "graph-skill": "bin/graph-skill.js"
   },
   "scripts": {
-    "test": "node --test && python3 -m unittest discover -s tests -p \"test_*.py\""
+    "test": "node --test && python3 -m unittest discover -s tests -p \"test_*.py\"",
+    "prepack": "node -e \"const fs=require('fs'),path=require('path');(function rm(d){for(const e of fs.readdirSync(d,{withFileTypes:true})){const f=path.join(d,e.name);if(e.isDirectory()){if(e.name==='__pycache__')fs.rmSync(f,{recursive:true,force:true});else rm(f)}}})('skills')\""
   },
   "engines": {
     "node": ">=18"
