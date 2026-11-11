@@ -1,0 +1,9 @@
+{
+  "_note": "Host values per capability tier. Data, not code. Claude Code has no model catalog, so its aliases live here. Update this file when the host adds or renames an alias. A user file at ~/.config/graph-skill/tiers.json always wins.",
+  "hosts": {
+    "claude-code": {
+      "as_of": "2026-11-10",
+      "tiers": {"deep": "opus", "build": "sonnet", "quick": "haiku"}
+    }
+  }
+}

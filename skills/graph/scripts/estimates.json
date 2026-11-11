@@ -1,0 +1,9 @@
+{
+  "as_of": "2026-11-10",
+  "note": "Shipped starting points in fresh tokens (input + output + cache write) per node. They are rough defaults, not your history.",
+  "tiers": {
+    "deep": {"median": 120000, "p80": 250000},
+    "build": {"median": 80000, "p80": 180000},
+    "quick": {"median": 15000, "p80": 40000}
+  }
+}

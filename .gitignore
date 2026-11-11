@@ -1,5 +1,7 @@
 __pycache__/
 node_modules/
 *.tgz
-.graph/
+.graph/runs/
+.graph/preflight.json
 .DS_Store
+.graph/cache/

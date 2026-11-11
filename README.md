@@ -1,234 +1,182 @@
-# Graph Skill
+# Graph
 
-**Graph engineering for Claude Code, Codex, OpenCode, Cursor, and OpenClaw.**
-Stop having one long agent conversation. Plan the work as a dependency graph of small, focused nodes — cached, validated, and retried individually — and watch it run live in your terminal.
+A plan gate and run recorder for coding agents. You write a plan as a dependency graph. A small Python script checks the plan and refuses rule breaks. It also records every run.
 
-[![npm](https://img.shields.io/npm/v/graph-skill?color=cb3837&label=npm)](https://www.npmjs.com/package/graph-skill)
 [![CI](https://github.com/gwaghmar/graph/actions/workflows/ci.yml/badge.svg)](https://github.com/gwaghmar/graph/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Node](https://img.shields.io/badge/node-%3E%3D18-339933?logo=node.js&logoColor=white)](package.json)
 
-```
-npx graph-skill install
-```
+## What the code enforces
 
----
+These rules live in `graph.py`, not in a prompt. The model cannot skip them. A refused action exits with code 3 and prints one line saying why and what to do. Other codes: 2 is bad input, and 1 is a failed `validate` (bad plan) or failed `quality` run.
 
-### This is what a run looks like — live, in your terminal, zero extra tokens:
+- A plan with unknown, self or cyclic dependencies is rejected.
+- A node cannot start while a dependency is unfinished.
+- A node cannot start after it used all its attempts. The default cap is 2 retries.
+- A node with `--check` cannot complete unless the check passes. The script runs the check itself. A failed check marks the node failed.
+- A run cannot finish as complete while nodes are open or the last quality run failed.
 
-```text
-◉ de140d98b1 · running  [████████░░░░░░] 3/5
-✔ inspect · analysis · 2.1s
-├─ ✔ analysis · analysis · 4.0s ← inspect
-├─ ✔ quality · validation · 1.2s ← inspect
-└─ ▶ review · review ← inspect
-   └─ ○ synthesis · synthesis ← analysis,quality,review
-```
+What the code does not enforce: that the host runs ready nodes in parallel, or that the model does good work. The script only records and refuses. Parallel runs need a host with subagents.
 
-No polling, no dashboard, no plugin. That tree is printed straight to stdout by a local Python script every time a node changes state — no model call involved.
+## Preflight scan
 
----
+`graph.py preflight --needs github,deploy` scans your machine before planning. It checks which CLIs are installed (git, gh, vercel, supabase, node, docker and others), whether gh, vercel and supabase are logged in, and what you can use to verify work (headless browser, simulators). It picks the best tool for each job you name. The result is cached in `.graph/preflight.json`.
 
-## What can it build?
-
-Anything your coding agent can do — Graph Skill doesn't write the code, it **organizes the work** so independent parts run in parallel, failures rerun alone, and finished parts never get redone. Type the task, get a graph:
-
-```text
-/graph Build a todo webapp with auth and a REST API
-```
-
-```mermaid
-flowchart LR
-  P[planner] --> PR[plan review]
-  PR --> S[scaffold project]
-  S --> M[data models]
-  S --> A[API routes]
-  S --> U[UI components]
-  M --> W[wire-up + integration]
-  A --> W
-  U --> W
-  W --> Q[lint · types · tests<br/>local, zero tokens]
-  Q --> V[reviewer]
-  V --> D[done + report]
-  style M stroke:#52b788
-  style A stroke:#52b788
-  style U stroke:#52b788
-  style Q stroke:#ffd166
-```
-
-The three green nodes touch **disjoint files**, so they run as parallel workers. Everything waits on the scaffold, integration waits on all three, and deterministic checks run before any AI reviewer spends a token. If `API routes` fails its tests, only it and `wire-up` rerun — models, UI, and scaffold are kept.
-
-| You ask for | The graph it builds |
-|---|---|
-| **A new feature** ("add CSV export") | backend node + frontend node in parallel → tests → review. Its home turf. |
-| **A whole webapp** | scaffold first, then models/API/UI fan out in parallel, converge on integration (diagram above). |
-| **Research / analysis** | read-only nodes are always independent — sources fan out wide, one synthesis node merges them. |
-| **A one-line fix** | no graph at all — sizing tiers skip the overhead when there's nothing to parallelize. |
-
-That last row matters: Graph Skill sizes the graph to the task (files touched × design decisions × risk), so you only pay the multi-agent token cost when parallelism or retry-isolation actually buys you something.
-
-## Table of contents
-
-- [Why](#why)
-- [What can it build?](#what-can-it-build)
-- [How a run looks](#how-a-run-looks)
-- [Install](#install)
-- [Usage](#usage)
-- [Features](#features)
-- [Supported hosts](#supported-hosts)
-- [Runtime reference](#runtime-reference)
-- [FAQ](#faq)
-- [Contributing](#contributing)
-- [Changelog](CHANGELOG.md)
-
-## Why
-
-Long single-conversation agent runs share one failure mode: something goes wrong halfway through, and you either accept a broken result or re-run the whole thing from scratch, burning tokens on the parts that already worked.
-
-Graph engineering fixes this by treating a coding task as a **dependency graph**, not a monologue:
-
-| | Single long conversation | Graph Skill |
-|---|---|---|
-| Unit of work | One continuous context | Small, bounded nodes with explicit dependencies |
-| Parallelism | None — sequential by construction | Independent nodes run concurrently |
-| A step fails | Re-run everything, or patch by hand | Only that node + its dependents re-run |
-| Unchanged work | Re-sent to the model every time | Served from a local content cache |
-| Progress visibility | Scrollback | Live ASCII graph, updated per node |
-| Checks before review | Ad hoc | Lint/types/tests run locally before any reviewer spends tokens |
-
-Graph Skill brings this directly into the coding assistant you already use — one install command, no orchestration framework, no separate service to run.
-
-The approach has a research pedigree: planning tool calls as a dependency graph and dispatching independent nodes in parallel is the architecture of [LLMCompiler (ICML 2024)](https://arxiv.org/abs/2312.04511), which reported large latency and cost reductions over sequential agent loops. Graph Skill applies the same idea to whole coding tasks, adding local caching, deterministic validation, and selective retries on top.
-
-## How a run looks
-
-```mermaid
-flowchart LR
-  P[planner] --> R[plan review]
-  R --> A[implement A]
-  R --> B[implement B]
-  A --> Q[local quality gates]
-  B --> Q
-  Q --> V[reviewer]
-  V --> S[synthesis + report]
-```
-
-- Independent nodes (`implement A`, `implement B`) run in parallel.
-- A failed node reruns alone, along with only its dependents — never the whole graph.
-- Unchanged nodes are served from the local content cache instead of new model calls.
-- Deterministic checks (lint, types, tests) run before any AI reviewer spends tokens.
+It records names and yes or no answers only. It parses MCP config files but keeps only server names, and never stores or prints env values or tokens. Account names are shown only with `--with-accounts`.
 
 ## Install
 
-Requirements: **Node.js 18+** (for the installer) and **`python3` on PATH** (for the local runtime; on Windows, install Python and confirm `python3` resolves).
+On Claude Code, the plugin is the first choice. Two commands:
 
 ```bash
-npx graph-skill install
+claude plugin marketplace add gwaghmar/graph
+claude plugin install graph@graph-skill
 ```
 
-The installer auto-detects your active host and installs only that adapter. Force a specific one with `--target`:
+For any other host, or as a fallback, use the installer. It needs Node 18 or newer. The runtime needs Python 3.9 or newer.
 
 ```bash
-npx graph-skill install --target codex
-npx graph-skill install --target claude
-npx graph-skill install --target opencode
-npx graph-skill install --target cursor
-npx graph-skill install --target openclaw
+npx graph-skill install            # this project
+npx graph-skill install --global   # your home folder
 ```
 
-## Usage
+It copies one skill folder to `.claude/skills/graph` and `.agents/skills/graph`. It also cleans up files from 0.x installs. Other commands: `update`, `uninstall`, `doctor`. Each takes `--global`.
 
-```text
-/graph Build OAuth login and tests
+## Quick example
+
+```bash
+G() { python3 .agents/skills/graph/scripts/graph.py "$@"; }
+G init "Add CSV export" --host claude --id r1
+G context --run r1                        # read the user: dated files, stale notes
+G profile --run r1 --text "short replies, likes tables"
+G preflight --run r1 --needs github,deploy
+G tools --run r1 --task "add CSV export"
+G choose --run r1 --clis gh --why "needs gh for the PR"
+G node r1 scaffold --role worker --status pending --goal "project scaffold"
+G node r1 api --role worker --status pending --depends-on scaffold \
+   --goal "export endpoint" --check "npm test"
+G node r1 ui --role worker --status pending --depends-on scaffold --goal "export button"
+G validate r1                             # rejects bad plans
+G approve --run r1 --note "go"            # only after the user says go; nodes cannot start before this
+G next r1                                 # lists ready nodes
+G node r1 scaffold --role worker --status running
+G node r1 scaffold --role worker --status complete
+G node r1 api --role worker --status running
+G node r1 api --role worker --status complete   # runs the check; refuses on failure
+G brief r1 api                            # retry brief for a new subagent
+G quality r1
+G finish r1 --status complete
+G summary r1
 ```
 
-| Host | Invocation |
+In normal use the agent runs these for you. Type `/graph <task>` on Claude Code, `$graph <task>` on Codex.
+
+## Commands
+
+| Command | What it does |
 |---|---|
-| Claude Code | `/graph Build OAuth login and tests` |
-| Codex | `$graph Build OAuth login and tests` |
-| OpenCode | `/graph Build OAuth login and tests` |
-| Cursor | `@graph Build OAuth login and tests` |
-| OpenClaw | `/graph Build OAuth login and tests` |
+| `preflight --needs a,b [--refresh] [--with-accounts] [--json] [--run id]` | Scan the environment, pick tools (`--run` logs it; nodes cannot start until it is logged) |
+| `log <run> [--refusals] [--node X] [--json]` | Show what the run did and what the rules refused |
+| `init "<task>" --size small|medium|large [--host H] [--max-retries N] [--skip-preflight R] [--skip-context R] [--skip-budget R] [--auto-approve WORDS]` | Start a run |
+| `context --run id` | Read the user: dated list of global, project and memory files, stale notes flagged |
+| `profile --run id --text "..."` | Record how this user works (10 lines max) |
+| `tools --run id --task "..."` | Rank skills and plugins for the task, show CLI and MCP picks |
+| `choose --run id [--skills --plugins --clis --mcp] --why "..."` | Record the chosen toolkit |
+| `budget --run id [--left-pct N --resets HH:MM] [--host auto]` | Usage left per window with reset time, plan estimate, and a recommendation. Required before approve. `--left-pct` records the user's answer when the host gives no usage |
+| `defer <run> --from-level N --not-before ISO` | Refuse starting nodes on level N and up until that time. A printed suggestion: nothing is scheduled |
+| `permit --key K --allow\|--deny\|--skip --note "..."` / `permits` | Ask once, remember. Per-user answers in `~/.config/graph-skill/permissions.json` for logins, installs, spend, turning tools on. Never approves a post |
+| `find --run id --part P --query "..."` | Search Reddit, Hacker News and GitHub (no login, last 90 days) for skills and repos people already made. Trust bar, top 3, one recommended |
+| `candidate --run id --part P --url U --mentions N --note "..."` | Add a find from X or the web. GitHub links are checked the same way |
+| `scan --run id --part P --pick owner/repo` | Shallow clone into `.graph/vendor` and a static safety scan: clean, warn or block |
+| `pick --run id --part P --use owner/repo [--as skill\|reference\|tool] [--ok "..."]` | Use a scanned find. Refuses unscanned or blocked. A skill installs in this project only, after approve |
+| `keep --run id --pick owner/repo` | Keep a pick at finish. The rest is removed |
+| `vendor-run --run id --pick owner/repo [--in vendor\|project] -- cmd...` | Run a picked tool, no shell, in a sandbox (macOS `sandbox-exec`, Linux `bwrap`) with PATH, LANG and a temporary HOME. Reads and writes stay in its folder, agent config is read only and any change is undone. No sandbox on the system: refused unless `--no-sandbox` |
+| `parts --run id --set a,b [--main a]`, `part-none --run id --part P --note "..."` | Name the parts of a job and log "none found". Large: every part needs a pick or a note before approve. Medium: only `--main` parts |
+| `checkpoint --run id [--serve [--background] [--open]] [--wait [--timeout S]] [--stop] [--terminal]` | One short keep/drop screen, then GO. `--serve --background` starts a local page detached and prints the link with its token at once. `--wait` polls for GO, `--stop` closes it. The browser opens only with `--open`. The summary says "pressed GO from a browser" or "from a script (not proof of a human)": the runtime cannot prove a human pressed GO. `--terminal` reads `go` or `drop 2,4`. Large jobs must show it before approve |
+| `size --run id --to small|medium|large`, `feature --run id --name "..."` | Change the size (logged, gates re-checked). Add a researched feature to the checkpoint |
+| `approve --run id --note "..."` | Record the user's go-ahead, in their words |
+| `node <run> <id> --role R --status S [...]` | Add or update a node, with rule checks |
+| `validate <run>` | Reject bad dependencies |
+| `next <run>` | List ready nodes |
+| `usage --run id [--host auto] [--session id] [--project-dir dir]` | Read real token use from the host's own files for this run, by node and by model, with cost at API prices. `finish` does this for you |
+| `prices [--refresh] [--run id]` | Show the price list in use. `--refresh` downloads a new one to `~/.cache/graph-skill/prices.json` |
+| `models [--refresh] [--host auto\|all\|H] [--run id]` | Show what deep, build and quick mean on each host, with source and data age |
+| `resolve <run> <node> [--host auto]` | Host-specific value for a node (Claude Code options, Codex flags, OpenCode `--model`), logged |
+| `brief <run> <node>` | Fresh-context retry brief |
+| `verify-plan <run> <node>` | Verification steps this machine supports |
+| `quality <run> [--command C]` | Run lint, type and test checks |
+| `retry-plan <run> --include-dependents` | List nodes to rerun |
+| `export-workflow <run> [--out F]` | Write a Claude Code Workflow script |
+| `finish <run> --status complete\|failed` | Close the run |
+| `resume` | Continue the latest open run |
+| `status`, `tree`, `summary`, `render`, `event` | Reports and run log |
+| `brief --run <id> --field ...` | Field brief: field, best sources today, freshness rule, age windows per source type, landmark rule, evidence standard, safety lines, who should check. Required before approve on medium and large runs. Shown as one card on the checkpoint. |
+| `source`, `gap`, `claim`, `research --close` | Research mode. `source` checks the date against the brief's window with the runtime's own clock (undated and too old are refused, landmarks need the brief's yes). `research --close` needs 5 valid sources and cited gaps and claims, or `--partial "<reason>"`. The report shows the sources table, evidence levels, safety lines and who should check. |
+| `grow init\|channel\|source\|read\|exp\|queue\|post\|video-check\|video-done\|tick\|brief\|report` | Growth mode: a campaign with one graph run per cycle, experiments with enforced rules, a permission queue for anything that posts (content-hash approval, 72 hour expiry, no auto-approve), a posting ladder, and video by code. The runtime records and gates; the model posts with host tools. See `references/protocol.md` |
 
-Optional flags:
+## Start: read the user, pick tools, agree the plan
 
-```text
-/graph --resume
-/graph Build OAuth login --commit
-```
+Before any node runs, the agent follows this order:
 
-`--resume` continues the latest incomplete run. `--commit` grants explicit permission to commit — without it, nothing gets committed for you.
+1. Size the task. Trivial tasks skip the graph. Otherwise `init --size small|medium|large` creates the run. Small needs only preflight and approve.
+2. Read the user. `context` lists the global, project and memory files with their age and flags notes older than 30 days as STALE. `profile` records how this user works.
+3. Pick tools. `preflight` scans the machine. `tools` ranks the installed skills and plugins for the task by word overlap (plain code, no AI) and notes strong matches that are turned off. `choose` records the toolkit. Unknown names are allowed and flagged.
+4. Work with the user. The agent shares options and asks for the user's own ideas before planning.
+5. Plan, then 6. show the plan (diagram, nodes, toolkit, checks) and ask "Go, or what would you change?". `approve` records the user's words.
+7. Run. 8. Finish. The summary shows the run date, stale context flagged, the toolkit and the approval.
 
-## Features
+The first node start is refused (exit 3) until preflight, profile, choose and approve are recorded. The refusal lists exactly what is missing. Escape hatches, all logged: `init --skip-preflight "<reason>"`, `--skip-context "<reason>"` (hosts with no user files, waives profile and choose) and `--auto-approve "<the user's words>"` (the user already said to go ahead; task text or text without a go-ahead phrase is refused).
 
-**Live and local, every run:**
-- **Live text graph** — every node state transition prints a compact rendering of the run graph: progress bar, status glyphs (`✔ ▶ ↻ ✖ ⚡ ○`), tree connectors, per-node roles and durations, retries, cache hits, and recorded tokens. Rendered locally in Python — zero model tokens. Reprint any time: `.graph/graph.py tree <run>`.
-- **Final run summary** — a complete recap: task, final node graph, quality checks, files touched, retries, cache hits, duration, recorded tokens, and the report path. `.graph/graph.py summary <run>`.
-- **Interactive HTML report** — `.graph/runs/<run-id>/graph.html` rewrites on every state change and **auto-refreshes in the browser while the run is live**. Nodes, dependencies, durations, files, retries, cache hits, per-node tokens, and checks.
-- **Timeline view** — a Gantt-style lane per node in the HTML report, showing when each node actually ran and how much of the run was truly parallel.
-- **Critical path** — the longest dependency chain by duration is computed locally, highlighted in the report, and printed in the run summary, so you can see exactly what bounded the wall-clock time.
-- **Plan validation** — `graph.py validate` deterministically rejects unknown, self, or cyclic dependencies before any implementation node runs. No tokens spent executing a malformed plan.
-- **Smart retry** — reruns only failed nodes and their dependents.
-- **Local quality gates** — auto-detects npm lint/typecheck/test, pytest, Cargo, or Go tests, and runs them before spending tokens on a reviewer.
-- **Content cache** — reuses successful nodes when the task and relevant file contents are unchanged.
-- **Resume** — continues the latest incomplete run.
-- **Optional commit** — commits only with explicit `--commit` permission.
-- **Local statistics** — completed nodes, failures, retries, cache hits, changed files, and both wall-clock and summed compute duration.
+Honest limit: the runtime cannot prove that an approval came from a human. It only records the text the agent passes. The log is a plain local file. The gates stop an agent from skipping steps by accident, not from lying.
 
-All reporting, checks, retry planning, cache lookup, and graph rendering run **locally** and use **no model tokens**. Token counts are shown only when the host actually exposes real usage data — most don't, so you'll see `0` rather than a made-up number.
+Usage budget: `budget` reads usage left from the host: Codex from the newest `~/.codex/sessions` rollout file (`rate_limits`), Claude Code from `~/.cache/graph-skill/claude-rate-limits.json`. A refilled Codex window counts as 0% used. Other hosts are unknown, so you ask the user and record the answer. Estimates come from your own `~/.config/graph-skill/history.jsonl` by (tier, role) when there are 5 or more samples, else from the shipped defaults, labeled "default, not your history". Tokens turn into percent only after 3 finished runs on that host and window (learned in `~/.config/graph-skill/budget-calib.jsonl`). Everything is approximate. The summary shows usage before and after, and estimate against actual per node.
+
+Claude Code statusline helper (opt-in): `npx graph-skill statusline --enable` prints the `settings.json` change. `--yes` writes it after a backup and wraps any statusLine you already have. It stores only usage percentages, reset times, the model id and the context size. Without it, Claude Code usage left is unknown.
+
+Token ledger: `usage` reads usage numbers, model ids, timestamps and ids from Claude Code transcripts (`~/.claude/projects/<project>/`, including subagent files) and Codex sessions (`~/.codex/sessions/`). It never reads message content, secrets or tokens. Cost is the API-price equivalent. On a subscription you pay your plan, not this. Other hosts show tokens as unknown. `finish` adds the table to the summary and appends one line per finished node (date, host, role, tokens, duration) to `~/.config/graph-skill/history.jsonl`.
+
+Privacy: `context` and `tools` print file names, dates and skill names with short descriptions only. They never print file bodies or env values, and home paths show as `~`.
+
+## Use what people already built
+
+For each part of a job, `find` looks at Reddit, Hacker News and GitHub, in that order, with no login. The model adds X and web finds with `candidate`. A find is shown only with 200 or more stars or 3 or more different people mentioning it in 90 days (own posts do not count, and a repo with no stars never passes on mentions alone), and an update in the last 90 days. `scan` reads every file of the top pick without running it: network calls, shell use, secret places, install scripts, hidden code, binaries, hook settings and prompt-injection text. A block cannot be picked. Picks install in the project only and `finish` removes them. `vendor-run` runs in a sandbox where one exists (macOS, Linux with `bwrap`): the tool cannot read your home or write to agent config, but the network stays open. On Windows it is refused unless you pass `--no-sandbox`. The scan also checks prose such as SKILL.md, and any URL or shell command in SKILL.md is at least a warning. Its prompt-injection check is a small list of known phrases, so it can miss new wording: read what you pick. Everything fetched is treated as untrusted text, and every command and refusal goes to the run log.
+
+## Routing by capability tier
+
+Plans never name a model. Each node asks for a tier with `--needs deep|build|quick` (and `--effort low|medium|high`), or the runtime derives it from the role. `resolve` turns the tier into a value for the current host. Order: your own `~/.config/graph-skill/tiers.json`, then the host's model catalog (Codex, OpenCode) or the aliases in `scripts/capabilities.json` (Claude Code), with models.dev prices used to rank catalog models. If nothing is known it says "host default, routing not applied". High-risk nodes never route below their tier. The last allowed attempt goes one tier up. The summary shows tier asked, value resolved and the model that really ran, and flags mismatches.
+
+## Logging
+
+Every command on a run is appended to `.graph/runs/<id>/log.jsonl`, one JSON line each: time, command, node, main arguments, outcome, exit code, and the refusal text. Refused moves are logged too, so you can see what the rules stopped. Check commands record exit code and duration. Run `graph.py log <run> --refusals` for a timeline, or open the HTML report (Activity section). The log is a plain local file, not a tamper-proof audit trail.
 
 ## Supported hosts
 
-| Host | Adapter | Trigger |
-|---|---|---|
-| [Claude Code](https://claude.com/claude-code) | `.claude/commands/graph.md` | `/graph` |
-| [Codex](https://openai.com/codex/) | `.codex/skills/graph/` | `$graph` |
-| [OpenCode](https://opencode.ai/) | `.opencode/commands/graph.md` | `/graph` |
-| [Cursor](https://cursor.com/) | `.cursor/rules/graph.mdc` | `@graph` |
-| [OpenClaw](https://openclaw.ai/) | `.agents/skills/graph/` | `/graph` |
+Graph is one skill folder in the [Agent Skills](https://agentskills.io) format. Hosts that read that standard can load it: Claude Code, Codex, OpenCode, Cursor and OpenClaw. Claude Code reads `.claude/skills`. The others read `.agents/skills`. Only Claude Code was used to build and test it. The other hosts are expected to work and are untested here.
 
-Each adapter is a thin prompt/rule file pointing at the same shared `.graph/` runtime — installing for a second host on the same repo reuses it.
+## Removed in 1.0
 
-## Runtime reference
+| Removed | Why |
+|---|---|
+| Content cache | Skipping nodes on a cache hit was never proven to be safe or to save anything. |
+| Token ledger | Most hosts do not expose real usage, so the numbers were zero or guesses. |
+| `--commit` flag | Committing for the user is unsafe. Commit yourself. |
+| Timeline and critical path report | Unproven value, and extra code to keep. |
+| Per-host adapter files | Replaced by one skill folder. |
 
-```bash
-python3 .graph/graph.py init "demo" --host codex
-python3 .graph/graph.py node RUN planner --role planner --status running
-python3 .graph/graph.py validate RUN  # reject unknown/cyclic dependencies before executing
-python3 .graph/graph.py quality RUN
-python3 .graph/graph.py retry-plan RUN --include-dependents
-python3 .graph/graph.py resume
-python3 .graph/graph.py tree RUN      # live ASCII graph
-python3 .graph/graph.py summary RUN   # final run summary (incl. critical path)
-python3 .graph/graph.py cache-prune --days 30
-```
+## Benchmark status
 
-## FAQ
-
-**Does this call an LLM to render the graph or reports?**
-No. `tree`, `summary`, the HTML report, quality gates, caching, and retry planning are all plain Python/local logic — they cost zero tokens.
-
-**What happens if a node fails?**
-Only that node and whatever depends on it re-runs. Everything upstream and every independent branch is left alone.
-
-**Will it commit my code without asking?**
-No — commits only happen with an explicit `--commit` flag on the invocation.
-
-**Does it work without an internet connection to the runtime?**
-The runtime itself (`graph.py`) is a local, dependency-free Python script — it just needs `python3` on PATH. Your host's model calls still need a connection.
+A benchmark scaffold is in `bench/`. It compares a plain agent, the native Claude Code Workflow and Graph on five tasks. It has not been run. There are no results. Do not assume Graph is faster or cheaper until it is.
 
 ## Contributing
 
-Issues and PRs welcome — see [open issues](https://github.com/gwaghmar/graph/issues). Run the test suite before opening a PR:
-
-```bash
-npm test
-```
+See [CONTRIBUTING.md](CONTRIBUTING.md). Run `npm test`.
 
 ## License
 
 [MIT](LICENSE)
 
----
-
-If Graph Skill saves you tokens or catches a bad run before it spreads, a ⭐ helps other people find it.
+## What the runtime records itself
+- Files: a git snapshot at node start and a diff at node end fill each node's files (parallel nodes may share attributions; no git, nothing recorded).
+- Start gates: the first node start is refused until preflight, profile, choose and approve are recorded (or the run used `--skip-preflight`, `--skip-context`, `--auto-approve`).
+- Goals: every node needs `--goal`. `validate` and `export-workflow` refuse the plan otherwise.
+- Summary: "What failed" lists every failed check and refusal from the log with how it was resolved. A "Parallel:" line says whether nodes truly overlapped in time.
+- Exported workflow scripts use a project-relative script path when the skill is installed in the project.
