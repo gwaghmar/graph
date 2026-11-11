@@ -105,7 +105,7 @@ Before any node runs, the agent follows this order:
 5. Plan, then 6. show the plan (diagram, nodes, toolkit, checks) and ask "Go, or what would you change?". `approve` records the user's words.
 7. Run. 8. Finish. The summary shows the run date, stale context flagged, the toolkit and the approval.
 
-The first node start is refused (exit 3) until preflight, profile, choose and approve are recorded. The refusal lists exactly what is missing. Escape hatches, all logged: `init --skip-preflight "<reason>"`, `--skip-context "<reason>"` (hosts with no user files, waives profile and choose) and `--auto-approve "<the user's words>"` (the user already said to go ahead).
+The first node start is refused (exit 3) until preflight, profile, choose and approve are recorded. The refusal lists exactly what is missing. Escape hatches, all logged: `init --skip-preflight "<reason>"`, `--skip-context "<reason>"` (hosts with no user files, waives profile and choose) and `--auto-approve "<the user's words>"` (the user already said to go ahead; task text or text without a go-ahead phrase is refused).
 
 Honest limit: the runtime cannot prove that an approval came from a human. It only records the text the agent passes. The log is a plain local file. The gates stop an agent from skipping steps by accident, not from lying.
 

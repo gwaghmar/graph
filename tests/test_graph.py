@@ -20,10 +20,10 @@ class GraphCase(unittest.TestCase):
         # Most tests are about other rules: skip the preflight gate. Gate tests pass preflight=True.
         # The context, tools and approval gates have their own tests in test_userctx.py.
         skip = [] if preflight else ['--skip-preflight', 'test']
-        self.g('init', 'task', '--id', 'r1', *skip, '--skip-context', 'test', '--auto-approve', 'test', *extra)
+        self.g('init', 'task', '--id', 'r1', *skip, '--skip-context', 'test', '--auto-approve', 'just do it', *extra)
 
     def node(self, nid, status, *extra, code=0):
-        return self.g('node', 'r1', nid, '--role', 'worker', '--status', status, *extra, code=code)
+        return self.g('node', 'r1', nid, '--role', 'research', '--status', status, *extra, code=code)
 
     def ran(self, nid, *extra):
         self.node(nid, 'running', *extra); self.node(nid, 'complete')
@@ -422,7 +422,7 @@ class RunLog(GraphCase):
 
     def test_unknown_run_creates_nothing(self):
         self.g('next', 'nope', code=2)
-        self.g('node', 'nope', 'a', '--role', 'w', '--status', 'running', code=2)
+        self.g('node', 'nope', 'a', '--role', 'research', '--status', 'running', code=2)
         self.assertFalse((Path(self.dir) / '.graph/runs/nope').exists())
 
     def test_check_logged(self):
@@ -445,7 +445,7 @@ class RunLog(GraphCase):
 
     def test_parallel_appends_valid(self):
         self.init()
-        procs = [subprocess.Popen([sys.executable, GRAPH, 'node', 'r1', f'n{i}', '--role', 'w', '--status', 'pending'],
+        procs = [subprocess.Popen([sys.executable, GRAPH, 'node', 'r1', f'n{i}', '--role', 'research', '--status', 'pending'],
                                   cwd=self.dir, stdout=subprocess.DEVNULL) for i in range(8)]
         for p in procs: self.assertEqual(p.wait(), 0)
         lines = [e for e in self.log() if e['cmd'] == 'node']
@@ -469,7 +469,7 @@ class RunLog(GraphCase):
         self.assertIn('<h2>Activity</h2>', html)
         self.assertIn('Rule refusals: 1', html)
         self.assertIn('class="bad"', html)
-        self.g('node', 'r1', 'a', '--role', 'w', '--status', 'skipped', '--reason', 'x')
+        self.g('node', 'r1', 'a', '--role', 'research', '--status', 'skipped', '--reason', 'x')
         self.g('finish', 'r1', '--status', 'failed')
         s = (Path(self.dir) / '.graph/runs/r1/summary.md').read_text(encoding='utf-8')
         self.assertIn('The rules refused 1 action(s) on node(s): a.', s)
@@ -529,7 +529,8 @@ class Fixes(GraphCase):
         self.assertIn('Finish: finish refused', s); self.assertIn('Resolved', s)
 
     def test_all_checked_says_so(self):
-        self.init('--quality-command', f'"{sys.executable}" -c "pass"')
+        import shutil
+        self.init('--quality-command', 'python3 -c "pass"' if shutil.which('python3') else 'python -c "pass"')
         self.node('a', 'pending', '--goal', 'g', '--check', 'true'); self.ran('a')
         self.g('quality', 'r1'); self.g('finish', 'r1')
         self.assertIn('Every node check ran and passed', self.summary())
@@ -568,7 +569,7 @@ class Fixes(GraphCase):
         self.node('a', 'running'); self.node('a', 'complete')
 
     def test_skip_preflight_logged(self):
-        self.g('init', 't', '--id', 'r1', '--skip-preflight', 'user said no', '--skip-context', 'x', '--auto-approve', 'x')
+        self.g('init', 't', '--id', 'r1', '--skip-preflight', 'user said no', '--skip-context', 'x', '--auto-approve', 'just do it')
         self.assertEqual(self.state()['skip_preflight'], 'user said no')
         log = (Path(self.dir) / '.graph/runs/r1/log.jsonl').read_text(encoding='utf-8')
         self.assertIn('user said no', log)
@@ -589,8 +590,8 @@ class Fixes(GraphCase):
         skill = Path(self.dir) / '.claude/skills/graph'
         shutil.copytree(Path(GRAPH).parent.parent, skill, ignore=shutil.ignore_patterns('__pycache__'))
         run = lambda *a: subprocess.run([sys.executable, str(skill / 'scripts/graph.py'), *a], cwd=self.dir, capture_output=True, text=True)
-        self.assertEqual(run('init', 't', '--id', 'r1', '--skip-preflight', 'x', '--skip-context', 'x', '--auto-approve', 'x').returncode, 0)
-        self.assertEqual(run('node', 'r1', 'a', '--role', 'w', '--status', 'pending', '--goal', 'g').returncode, 0)
+        self.assertEqual(run('init', 't', '--id', 'r1', '--skip-preflight', 'x', '--skip-context', 'x', '--auto-approve', 'just do it').returncode, 0)
+        self.assertEqual(run('node', 'r1', 'a', '--role', 'research', '--status', 'pending', '--goal', 'g').returncode, 0)
         self.assertEqual(run('export-workflow', 'r1').returncode, 0)
         js = (Path(self.dir) / '.claude/workflows/graph-r1.js').read_text(encoding='utf-8')
         self.assertIn('.claude/skills/graph/scripts/graph.py node r1 a', js)
@@ -618,8 +619,104 @@ class Fixes(GraphCase):
         self.node('a', 'running'); self.node('b', 'running'); self.node('a', 'complete'); self.node('b', 'complete')
         self.g('finish', 'r1')
         self.assertIn('nodes overlapped in time: yes', self.summary())
-        self.g('init', 't', '--id', 'r3', '--skip-preflight', 'x', '--skip-context', 'x', '--auto-approve', 'x')
-        self.g('node', 'r3', 'a', '--role', 'w', '--status', 'pending')
+        self.g('init', 't', '--id', 'r3', '--skip-preflight', 'x', '--skip-context', 'x', '--auto-approve', 'just do it')
+        self.g('node', 'r3', 'a', '--role', 'research', '--status', 'pending')
         self.g('finish', 'r3', '--status', 'failed')
         s = (Path(self.dir) / '.graph/runs/r3/summary.md').read_text(encoding='utf-8')
         self.assertIn('no plan level had 2 or more nodes', s)
+
+
+class SecondRound(GraphCase):
+    def raw_init(self, *args, code=0, env=None):
+        import os
+        r = subprocess.run([sys.executable, GRAPH, 'init', *args], cwd=self.dir, capture_output=True, text=True,
+                           encoding='utf-8', env=env or os.environ)
+        self.assertEqual(r.returncode, code, f'{args}: {r.stdout}{r.stderr}')
+        return r
+
+    def md(self):
+        subprocess.run([sys.executable, GRAPH, 'finish', 'r1', '--status', 'failed'], cwd=self.dir, capture_output=True)
+        return (Path(self.dir) / '.graph/runs/r1/summary.md').read_text(encoding='utf-8')
+
+    def log(self):
+        return (Path(self.dir) / '.graph/runs/r1/log.jsonl').read_text(encoding='utf-8')
+
+    def test_auto_approve_refuses_task_text(self):
+        task = 'Add a login page with email and password fields'
+        for words in (task, 'login page with email', 'add a login page with fields please'):
+            self.raw_init(task, '--id', 'r1', '--skip-context', 'x', '--auto-approve', words, code=3)
+            self.assertIn("Auto-approve needs the user's own go-ahead words", self.log())
+            self.assertNotIn('auto_approve', self.state())
+            import shutil; shutil.rmtree(Path(self.dir) / '.graph')
+
+    def test_auto_approve_needs_go_ahead_phrase(self):
+        r = self.raw_init('Fix the bug', '--id', 'r1', '--skip-context', 'x', '--auto-approve', 'sounds fine to me', code=3)
+        self.assertIn('Show the plan and ask', r.stderr)
+        self.assertIn('"outcome": "refused"', self.log())
+
+    def test_auto_approve_accepts_go_ahead(self):
+        self.raw_init('Fix the bug', '--id', 'r1', '--skip-context', 'x', '--auto-approve', 'Yes, just do it')
+        self.assertEqual(self.state()['auto_approve'], 'Yes, just do it')
+
+    def test_init_host_uses_shared_detection(self):
+        import os
+        env = dict(os.environ, CLAUDECODE='1', CODEX_SANDBOX='1')
+        self.raw_init('t', '--id', 'r1', '--skip-context', 'x', env=env)
+        self.assertEqual(self.state()['host'], 'codex')
+        env2 = {k: v for k, v in env.items() if not k.startswith('CODEX_')}
+        self.raw_init('t', '--id', 'r2', '--host', 'codex', '--skip-context', 'x', env=env2)
+
+    def test_build_node_needs_check_or_reason(self):
+        self.init()
+        self.g('node', 'r1', 'a', '--role', 'build', '--status', 'pending', '--goal', 'g')
+        r = self.g('validate', 'r1', code=3)
+        self.assertIn('without a check: a', r.stdout)
+        self.g('node', 'r1', 'a', '--role', 'build', '--status', 'pending', '--no-check', 'visual only')
+        self.g('validate', 'r1')
+        self.g('node', 'r1', 'b', '--role', 'review', '--status', 'pending', '--goal', 'g')
+        self.g('validate', 'r1')
+        self.node('a', 'running'); self.node('a', 'complete')
+        self.g('node', 'r1', 'a', '--role', 'build', '--status', 'complete', '--no-check', 'changed', code=3)
+        self.assertIn('visual only', self.md())
+
+    def test_summary_flags_outside_path(self):
+        self.init()
+        self.node('a', 'pending', '--goal', 'g', '--check', '/tmp/venv/bin/pytest -q || true')
+        self.node('b', 'pending', '--goal', 'g', '--check', './local/pytest -q || true')
+        out = self.md()
+        self.assertIn('check depends on /tmp/venv/bin/pytest outside the project; it may fail elsewhere', out)
+        self.assertNotIn('local/pytest outside', out)
+
+    @unittest.skipUnless(have_git(), 'git missing')
+    def test_overlapping_nodes_share_files(self):
+        subprocess.run(['git', 'init', '-q'], cwd=self.dir)
+        self.init()
+        for n in 'ab': self.node(n, 'pending', '--goal', 'g')
+        self.node('a', 'running'); self.node('b', 'running')
+        (Path(self.dir) / 'x.txt').write_text('1', encoding='utf-8')
+        (Path(self.dir) / 'own.txt').write_text('1', encoding='utf-8')
+        self.node('a', 'complete'); self.node('b', 'complete', '--files', 'own.txt')
+        nodes = {n['id']: n for n in self.state()['nodes']}
+        self.assertEqual(nodes['a']['files'], [])
+        self.assertIn('x.txt', nodes['a']['shared_files'])
+        self.assertEqual(nodes['b']['files'], ['own.txt'])
+        out = self.md()
+        self.assertIn('Files shared with b', out)
+        self.assertIn('shared: a, b', out)
+
+    def test_profile_needs_sources(self):
+        self.g('init', 't', '--id', 'r1', '--skip-preflight', 'x')
+        self.g('profile', '--run', 'r1', '--text', 'short replies', code=2)
+        self.g('profile', '--run', 'r1', '--text', 'short replies [memory]\nplain [~/.claude/CLAUDE.md]')
+
+    def test_profile_exact_when_no_user_files(self):
+        import os
+        home = Path(self.dir) / 'home'; home.mkdir()
+        env = dict(os.environ, HOME=str(home), USERPROFILE=str(home))
+        def run(*a, code=0):
+            r = subprocess.run([sys.executable, GRAPH, *a], cwd=self.dir, capture_output=True, text=True, encoding='utf-8', env=env)
+            self.assertEqual(r.returncode, code, r.stdout + r.stderr); return r
+        run('init', 't', '--id', 'r1', '--skip-preflight', 'x')
+        run('context', '--run', 'r1')
+        run('profile', '--run', 'r1', '--text', 'likes tables [user said]', code=2)
+        run('profile', '--run', 'r1', '--text', 'No user rules found [none]')

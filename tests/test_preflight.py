@@ -139,11 +139,32 @@ class PreflightCase(unittest.TestCase):
         res['needs'] = preflight.resolve(preflight.load_jobs(), list(preflight.load_jobs()), res)
         self.assertLessEqual(len(preflight.summary(res).splitlines()), 8)
 
-    def test_cli_unknown_need_exits_2(self):
-        r = subprocess.run([sys.executable, str(CORE / 'graph.py'), 'preflight', '--needs', 'nope'],
-                           cwd=self.cwd, capture_output=True, text=True, encoding='utf-8')
-        self.assertEqual(r.returncode, 2)
-        self.assertIn('Known needs', r.stderr)
+    def cli(self, *args, env=None):
+        import os
+        return subprocess.run([sys.executable, str(CORE / 'graph.py'), 'preflight', *args], cwd=self.cwd,
+                              capture_output=True, text=True, encoding='utf-8', env=env or os.environ)
+
+    def test_cli_unknown_need_is_reported_not_refused(self):
+        r = self.cli('--needs', 'python,github')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('no mapping for python, use your judgment', r.stdout)
+
+    def test_needs_none_is_empty(self):
+        r = self.cli('--needs', 'none')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn('no mapping', r.stdout)
+
+    def test_unknown_need_logged(self):
+        subprocess.run([sys.executable, str(CORE / 'graph.py'), 'init', 't', '--id', 'r1', '--skip-context', 'x'],
+                       cwd=self.cwd, capture_output=True, text=True)
+        self.cli('--run', 'r1', '--needs', 'python')
+        log = (self.cwd / '.graph/runs/r1/log.jsonl').read_text(encoding='utf-8')
+        self.assertIn('"unmapped": ["python"]', log)
+
+    def test_host_codex_beats_leaked_claudecode(self):
+        env = {'CLAUDECODE': '1', 'CODEX_SANDBOX': '1'}
+        self.assertEqual(preflight.detect_host(env, self.cwd, self.home), 'codex')
+        self.assertEqual(preflight.detect_host({'CLAUDECODE': '1'}, self.cwd, self.home), 'claude-code')
 
 
 if __name__ == '__main__':

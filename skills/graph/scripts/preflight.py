@@ -124,10 +124,11 @@ def v_mirroring():
 
 # ---- static scans (names only) ----
 def detect_host(env, cwd, home):
+    # One function for preflight and init. Codex variables win over a leaked CLAUDECODE.
+    if any(k.startswith('CODEX_') for k in env): return 'codex'
     if env.get('CLAUDECODE'): return 'claude-code'
     if env.get('CURSOR_TRACE_ID') or env.get('CURSOR_AGENT'): return 'cursor'
-    for name, prefix in (('codex', 'CODEX_'), ('opencode', 'OPENCODE')):
-        if any(k.startswith(prefix) for k in env): return name
+    if any(k.startswith('OPENCODE') for k in env): return 'opencode'
     for name, p in (('claude-code', home / '.claude'), ('cursor', cwd / '.cursor'),
                     ('codex', home / '.codex'), ('opencode', home / '.config' / 'opencode')):
         if p.is_dir(): return name + ' (guessed from config dir)'
@@ -442,15 +443,19 @@ def summary(r):
     needs = [f"need {k}: " + (f"{d['use']}" + (f" ({d['note']})" if d['note'] else '') if d['use'] else d['workaround'])
              for k, d in r.get('needs', {}).items()]
     if len(needs) > 2: needs = [needs[0], ' ; '.join(needs[1:])]
+    needs += [f'no mapping for {n}, use your judgment' for n in r.get('unmapped', [])]
     return '\n'.join(lines + needs)
 
 def run_preflight(needs, refresh=False, with_accounts=False, as_json=False, info=None):
-    """Return the text to print. Raise ValueError for an unknown need."""
+    """Return the text to print. Needs with no mapping are reported, not refused. 'none' means no needs."""
     jobs = load_jobs()
-    bad = [n for n in needs if n not in jobs]
-    if bad: raise ValueError(f"Unknown need: {', '.join(bad)}. Known needs: {', '.join(sorted(jobs))}.")
+    needs = [n for n in needs if n.lower() != 'none']
+    unmapped = [n for n in needs if n not in jobs]
+    needs = [n for n in needs if n in jobs]
     r = scan(Path.cwd(), Path.home(), os.environ, refresh, with_accounts)
     if needs: r['needs'] = resolve(jobs, needs, r)
+    if unmapped: r['unmapped'] = unmapped
+    if info is not None and unmapped: info['unmapped'] = unmapped
     if info is not None:  # names and statuses only, for the run log
         info['needs'] = {k: {'tool': d['use'], 'note': d.get('note', '')} for k, d in r.get('needs', {}).items()}
         info['workarounds'] = {k: d['workaround'] for k, d in r.get('needs', {}).items() if not d['use']}

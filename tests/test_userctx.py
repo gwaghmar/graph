@@ -53,7 +53,7 @@ class Base(unittest.TestCase):
         return self.home / '.claude' / 'projects' / re.sub(r'[^A-Za-z0-9]', '-', str(self.proj)) / 'memory'
 
     def node(self, status, code=0, nid='a'):
-        return self.g('node', 'r1', nid, '--role', 'w', '--status', status, '--goal', 'g', code=code)
+        return self.g('node', 'r1', nid, '--role', 'research', '--status', status, '--goal', 'g', code=code)
 
     def settings(self, **kw):
         write(self.home / '.claude/settings.json', json.dumps(kw))
@@ -126,18 +126,18 @@ class ContextTests(Base):
 class ProfileTests(Base):
     def test_profile_ok_and_logged(self):
         self.init()
-        self.g('profile', '--run', 'r1', '--text', 'short replies\nlikes tables')
-        self.assertEqual(self.state()['profile']['text'], 'short replies\nlikes tables')
+        self.g('profile', '--run', 'r1', '--text', 'short replies [user said]\nlikes tables [memory]')
+        self.assertEqual(self.state()['profile']['text'], 'short replies [user said]\nlikes tables [memory]')
         self.assertIn('likes tables', self.log())
 
     def test_profile_limits(self):
         self.init()
-        r = self.g('profile', '--run', 'r1', '--text', '\n'.join(['x'] * 11), code=2)
+        r = self.g('profile', '--run', 'r1', '--text', '\n'.join(['x [memory]'] * 11), code=2)
         self.assertIn('10 lines', r.stderr)
-        self.g('profile', '--run', 'r1', '--text', 'y' * 1201, code=2)
+        self.g('profile', '--run', 'r1', '--text', 'y' * 1201 + ' [memory]', code=2)
         self.g('profile', '--run', 'r1', '--text', '  ', code=2)
-        self.g('profile', '--run', 'r1', '--text', '\n'.join(['x'] * 10))
-        self.g('profile', '--run', 'r1', '--text', 'z' * 1200)
+        self.g('profile', '--run', 'r1', '--text', '\n'.join(['x [memory]'] * 10))
+        self.g('profile', '--run', 'r1', '--text', 'z' * 1170 + ' [memory]')
         self.assertIn('"outcome": "invalid"', self.log())
 
 
@@ -279,11 +279,11 @@ class ChooseTests(CatalogCase):
 class GateTests(Base):
     def prepare(self, *extra):
         self.init(*extra)
-        self.g('node', 'r1', 'a', '--role', 'w', '--status', 'pending', '--goal', 'g')
+        self.g('node', 'r1', 'a', '--role', 'research', '--status', 'pending', '--goal', 'g')
 
     def test_all_missing_listed(self):
         self.g('init', 'task', '--id', 'r1')
-        self.g('node', 'r1', 'a', '--role', 'w', '--status', 'pending', '--goal', 'g')
+        self.g('node', 'r1', 'a', '--role', 'research', '--status', 'pending', '--goal', 'g')
         r = self.node('running', code=3)
         for x in ('preflight: run', 'profile: read the user', 'choose: run', 'approve: show the plan', '--skip-preflight',
                   '--skip-context', '--auto-approve', 'context --run r1', 'profile --run r1', 'choose --run r1', 'approve --run r1'):
@@ -299,8 +299,8 @@ class GateTests(Base):
         run = lambda *a: subprocess.run([sys.executable, str(dest / 'scripts/graph.py'), *a], cwd=self.proj,
                                         capture_output=True, text=True, encoding='utf-8', env=self.env())
         self.assertEqual(run('init', 't', '--id', 'r1').returncode, 0)
-        run('node', 'r1', 'a', '--role', 'w', '--status', 'pending', '--goal', 'g')
-        r = run('node', 'r1', 'a', '--role', 'w', '--status', 'running')
+        run('node', 'r1', 'a', '--role', 'research', '--status', 'pending', '--goal', 'g')
+        r = run('node', 'r1', 'a', '--role', 'research', '--status', 'running')
         self.assertEqual(r.returncode, 3)
         self.assertIn('~/.claude/skills/graph/scripts/graph.py', r.stderr)
         self.assertNotIn(USER, r.stderr); self.assertNotIn(USER, self.log())
@@ -310,7 +310,7 @@ class GateTests(Base):
         r = self.node('running', code=3)
         self.assertNotIn('preflight: run', r.stderr)
         self.assertIn('profile: read', r.stderr); self.assertIn('approve: show', r.stderr)
-        self.g('profile', '--run', 'r1', '--text', 'terse')
+        self.g('profile', '--run', 'r1', '--text', 'terse [user said]')
         r = self.node('running', code=3)
         self.assertNotIn('profile: read', r.stderr); self.assertIn('choose: run', r.stderr)
         self.g('choose', '--run', 'r1', '--skills', 'x', '--why', 'because')
@@ -347,7 +347,7 @@ class GateTests(Base):
         self.g('approve', '--run', 'nope', '--note', 'x', code=2)
 
     def test_retry_also_gated_only_by_missing_steps(self):
-        self.prepare('--skip-context', 'x', '--auto-approve', 'go')
+        self.prepare('--skip-context', 'x', '--auto-approve', 'go ahead')
         self.node('running'); self.node('failed')
         self.node('retrying')
 
@@ -373,9 +373,9 @@ class FreshnessTests(Base):
         self.init()
         self.assertEqual(self.state()['run_date'], today)
         self.g('context', '--run', 'r1')
-        self.g('profile', '--run', 'r1', '--text', 'terse')
+        self.g('profile', '--run', 'r1', '--text', 'terse [user said]')
         self.g('choose', '--run', 'r1', '--skills', 'x', '--why', 'w')
-        self.g('node', 'r1', 'a', '--role', 'w', '--status', 'pending', '--goal', 'g')
+        self.g('node', 'r1', 'a', '--role', 'research', '--status', 'pending', '--goal', 'g')
         self.g('approve', '--run', 'r1', '--note', 'go ahead please')
         self.node('running'); self.node('complete')
         self.g('finish', 'r1', '--status', 'failed')
@@ -403,12 +403,12 @@ class ReviewFixTests(Base):
     def test_approve_needs_plan_and_is_tied_to_it(self):
         self.init()
         self.g('approve', '--run', 'r1', '--note', 'go', code=2)  # no nodes
-        self.g('context', '--run', 'r1'); self.g('profile', '--run', 'r1', '--text', 't')
+        self.g('context', '--run', 'r1'); self.g('profile', '--run', 'r1', '--text', 'No user rules found [none]')
         self.g('choose', '--run', 'r1', '--skills', 'x', '--why', 'w')
-        self.g('node', 'r1', 'a', '--role', 'w', '--status', 'pending', '--goal', 'g')
+        self.g('node', 'r1', 'a', '--role', 'research', '--status', 'pending', '--goal', 'g')
         self.g('approve', '--run', 'r1', '--note', 'go')
-        self.g('node', 'r1', 'b', '--role', 'w', '--status', 'pending', '--goal', 'g2')
-        r = self.g('node', 'r1', 'a', '--role', 'w', '--status', 'running', '--goal', 'g', code=3)
+        self.g('node', 'r1', 'b', '--role', 'research', '--status', 'pending', '--goal', 'g2')
+        r = self.g('node', 'r1', 'a', '--role', 'research', '--status', 'running', '--goal', 'g', code=3)
         self.assertIn('plan changed after approval', r.stderr)
         self.g('approve', '--run', 'r1', '--note', 'go again')
         self.node('running')

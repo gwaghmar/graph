@@ -81,6 +81,21 @@ def descendants(d, roots):
                 selected.add(n['id']); changed = True
     return selected
 
+GO_AHEAD = ('go ahead', 'just do it', 'no need to ask', 'approve', 'proceed', 'ship it', "don't ask", 'do not ask', 'without asking', 'without review', 'skip approval')
+AUTO_MSG = "Auto-approve needs the user's own go-ahead words, not the task. Show the plan and ask."
+
+def _norm_words(text): return re.findall(r'[a-z0-9]+', (text or '').lower())
+
+def auto_approve_problem(words_text, task):
+    """Why --auto-approve text is not the user's own go-ahead, or None when it looks fine."""
+    w, t = _norm_words(words_text), _norm_words(task)
+    if not w: return AUTO_MSG
+    ws, ts = ' '.join(w), ' '.join(t)
+    if ws == ts or ws in ts: return AUTO_MSG
+    if len(set(w) & set(t)) / len(set(w)) > 0.6: return AUTO_MSG
+    if not any(' '.join(_norm_words(p)) in ws for p in GO_AHEAD): return AUTO_MSG + ' No explicit go-ahead phrase found.'
+    return None
+
 def cmd_init(a):
     if a.max_retries < 0: die(2, '--max-retries must be 0 or more.')
     if a.skip_preflight is not None and not a.skip_preflight.strip(): die(2, '--skip-preflight needs a reason, for example --skip-preflight "user declined".')
@@ -89,22 +104,32 @@ def cmd_init(a):
             die(2, f'{flag} needs text. For --skip-context give a reason. For --auto-approve give the exact words the user said that allow going ahead without review.')
     rid = a.id or uuid.uuid4().hex[:10]
     check_run_id(rid); CTX['run'] = rid
+    import preflight
+    detected = preflight.safe(lambda: preflight.detect_host(os.environ, Path.cwd(), Path.home()), 'unknown')
+    host = a.host or detected
+    refuse_auto = auto_approve_problem(a.auto_approve, a.task) if a.auto_approve else None
     if (ROOT / rid).exists(): die(3, f'Refused: run {rid} already exists. Pick a new --id, or continue it with "resume".')
     ensure_ignore()
     p = ROOT / rid / 'state.json'
     data = {
-        'schema_version': 4, 'id': rid, 'run_date': userctx.today_utc(), 'task': a.task, 'host': a.host, 'max_retries': a.max_retries,
+        'schema_version': 4, 'id': rid, 'run_date': userctx.today_utc(), 'task': a.task, 'host': host, 'host_detected': detected, 'max_retries': a.max_retries,
         'quality_commands': a.quality_command or [], 'status': 'planning', 'created_at': now(), 'updated_at': now(),
         'git': git_info(), 'nodes': [], 'events': [], 'quality': []
     }
     if a.skip_preflight: data['skip_preflight'] = a.skip_preflight.strip()
     if a.skip_context: data['skip_context'] = a.skip_context.strip()
-    if a.auto_approve: data['auto_approve'] = a.auto_approve.strip()
+    if a.auto_approve and not refuse_auto: data['auto_approve'] = a.auto_approve.strip()
     save(p, data); render_files(p, data); print(rid)
+    if a.host and detected not in ('unknown',) and a.host.lower() != detected.split(' ')[0].lower():
+        print(f"Note: --host {a.host} differs from the detected host {detected}. Both are recorded.", file=sys.stderr)
+    if refuse_auto:
+        print(f"Run {rid} was created without auto-approve.", file=sys.stderr)
+        die(3, 'Refused: ' + refuse_auto)
 
 def unmet(d, n):
     return [dep for dep in n.get('depends_on', []) if (get_node(d, dep) or {}).get('status') not in DONE]
 
+NO_CHECK_ROLES = ('research', 'docs', 'review', 'design')
 TARGETS = ('web', 'phone', 'desktop', 'api', 'data', 'none')
 RISKS = ('low', 'high')
 
@@ -252,6 +277,8 @@ def guard(a, d, n):
         die(3, f"Refused: dependencies of {a.node} are locked once planning ends. Set them with --status pending before the first node runs.")
     if n is not None and a.check is not None and a.check != n.get('check') and not planning_call:
         die(3, f"Refused: the check of {a.node} is locked once planning ends. Set it with --status pending before the first node runs.")
+    if n is not None and a.no_check is not None and a.no_check.strip() != (n.get('no_check') or '') and not planning_call:
+        die(3, f"Refused: --no-check of {a.node} is locked once planning ends.")
     if a.status != 'pending':
         waiting = unmet(d, {'depends_on': deps})
         if waiting: die(3, f"Refused: {a.node} cannot move to {a.status}, waiting on {', '.join(waiting)}. Finish those nodes first.")
@@ -265,6 +292,7 @@ def cmd_node(a):
     if a.status not in STATUSES: die(2, f"Invalid status '{a.status}'. Use one of: {', '.join(STATUSES)}.")
     if a.check_timeout < 1: die(2, '--check-timeout must be 1 or more.')
     new = {'id': a.node, 'check': a.check, 'target': a.target, 'risk': a.risk}
+    if a.no_check is not None and not a.no_check.strip(): die(2, '--no-check needs a reason.')
     bad = field_problems(new)
     if bad: die(2, f"Bad plan field: {bad[0]}.")
     _, d0 = load(a.run)
@@ -286,7 +314,7 @@ def apply_node(a, result):
              'started_epoch': None, 'ended_epoch': None}
     previous = None if created else n.get('status')
     if created: d['nodes'].append(n)
-    n.update({k: v for k, v in {'role': a.role, 'status': a.status, 'model': a.model, 'check': a.check,
+    n.update({k: v for k, v in {'role': a.role, 'status': a.status, 'model': a.model, 'check': a.check, 'no_check': (a.no_check or '').strip() or None,
                                 'target': a.target, 'risk': a.risk, 'goal': (a.goal or '').strip() or None, 'skip_reason': a.reason}.items() if v is not None})
     n['depends_on'] = deps
     if a.files: n['files'] = sorted(set(n.get('files', []) + a.files))
@@ -306,7 +334,14 @@ def apply_node(a, result):
         snap = n.pop('snapshot')
         if snap:
             auto = changed_since(snap)
-            if auto: n['files'] = sorted(set(n.get('files', []) + auto))
+            t0, t1 = n.get('started_epoch') or 0, epoch()
+            others = [o['id'] for o in d['nodes'] if o is not n and (o.get('status') in ('running', 'retrying') or
+                      any(s[0] < t1 and s[1] > t0 for s in o.get('spans', [])))]
+            own = set(n.get('files', []))
+            if auto and others:
+                n['shared_files'] = sorted(set(n.get('shared_files', [])) | (set(auto) - own))
+                n['shared_with'] = sorted(set(n.get('shared_with', [])) | set(others))
+            elif auto: n['files'] = sorted(own | set(auto))
             n['files_note'] = FILES_NOTE
     if n['status'] in ('complete', 'failed', 'skipped', 'cached'):
         n['ended_epoch'] = epoch(); n['ended_at'] = now()
@@ -537,6 +572,28 @@ def run_info(d):
     return [f"- Run date: {d.get('run_date') or 'unknown'}", f"- Stale context flagged: {st}", toolkit, approval,
             '- The runtime records the approval text. It cannot prove a human wrote it.']
 
+ABS_PATH = re.compile(r'''(?<![\w.~$:/\\-])((?:/|[A-Za-z]:[\\/])[^\s'"`;|&<>()=,]+)''')
+SYSTEM_PREFIXES = ('/dev/', '/bin/', '/usr/bin/', '/usr/sbin/', '/sbin/', '/proc/')
+INSTALL_RE = re.compile(r'\b(pip3?|brew|apt(-get)?) install\b|\bnpm (install|i) (-g|--global)\b')
+
+def outside_paths(d):
+    """(node id or 'quality', path) for absolute paths in check commands that lie outside the project, and installs outside it."""
+    try: root = ROOT.resolve().parent.parent.parent
+    except Exception: return []
+    rows = [(n['id'], n.get('check')) for n in d.get('nodes', [])] + [('quality', x.get('command')) for x in d.get('quality', [])]
+    out = []
+    for nid, cmd in rows:
+        if not cmd: continue
+        for m in ABS_PATH.findall(cmd):
+            q = m.rstrip('.')
+            if q in ('/',) or any((q + '/').startswith(s) for s in SYSTEM_PREFIXES): continue
+            try:
+                inside = Path(q).resolve() == root or root in Path(q).resolve().parents
+            except Exception: inside = False
+            if not inside and (nid, q) not in out: out.append((nid, q))
+        if INSTALL_RE.search(cmd) and (nid, 'a tool installed during the run') not in out: out.append((nid, 'a tool installed during the run'))
+    return out
+
 def build_summary(d):
     """Plain-language run summary built only from state. Short sentences, no claim the state does not show."""
     nodes=d.get('nodes',[]); status=d.get('status','unknown')
@@ -560,8 +617,14 @@ def build_summary(d):
     L=['# Run summary','',said,'','## Run info','']+run_info(d)+['','## What you asked','',d.get('task','') or 'No task recorded.','','## What changed','']
     if nodes:
         for n in nodes:
-            f=n.get('files',[])
-            L.append(f"- Node {n['id']} ({n.get('role','')}) is {n.get('status')}." + (f" Files: {', '.join(f)}." if f else ' No files recorded.'))
+            f=n.get('files',[]); sh=n.get('shared_files',[]); w=', '.join(n.get('shared_with',[]))
+            txt=(f" Files: {', '.join(f)}." if f else '')
+            if sh: txt+=(f" Shared files (with {w}): {', '.join(sh)}." if f else f" Files shared with {w}: {', '.join(sh)}.")
+            L.append(f"- Node {n['id']} ({n.get('role','')}) is {n.get('status')}." + (txt or ' No files recorded.'))
+        grp={}
+        for n in nodes:
+            if n.get('shared_files'): grp.setdefault(tuple(sorted(set([n['id']]+n.get('shared_with',[])))),set()).update(n['shared_files'])
+        for k,v in grp.items(): L.append(f"- shared: {', '.join(k)}: {', '.join(sorted(v))}.")
     else: L.append('- No nodes were recorded.')
     L+=['','## What was checked','']
     checks=0
@@ -570,7 +633,7 @@ def build_summary(d):
             checks+=1; ok=n.get('check_exit')==0
             L.append(f"- Node {n['id']}: check `{n.get('check','')}` {'passed' if ok else 'failed'} (exit {n.get('check_exit')}).")
         elif n.get('status') in DONE and n.get('status')!='skipped' and not n.get('check'):
-            L.append(f"- Node {n['id']}: no check ran. Nothing proves this node.")
+            L.append(f"- Node {n['id']}: no check ran. Nothing proves this node." + (f" Reason given: {short(n['no_check'],100)}." if n.get('no_check') else ''))
     for x in q:
         checks+=1; L.append(f"- Quality check `{x.get('command','')}`: {x.get('status','unknown')}.")
     if not checks and not any(l.startswith('- Node') for l in L[L.index('## What was checked'):]): L.append('- No check ran.')
@@ -587,6 +650,7 @@ def build_summary(d):
     todo+=[f"- Finish node {n['id']}. It is {n.get('status')}." for n in open_]
     if status=='complete-unverified': todo.append('- Test the result yourself. No check proved it.')
     todo+=[f"- {g}" for g in d.get('access_gaps',[])]
+    todo+=[f"- Node {nid}: check depends on {tilde(pth)} outside the project; it may fail elsewhere." for nid,pth in outside_paths(d)]
     passed=[n['id'] for n in nodes if n.get('status')=='complete' and n.get('check_exit')==0]
     unchecked=[n['id'] for n in nodes if n.get('status') in ('complete','cached') and n.get('check_exit')!=0]
     if skipped: todo.append(f"- Skipped or cached, not run: {', '.join(skipped)}. Confirm that is fine.")
@@ -738,6 +802,8 @@ def cmd_validate(a):
             elif dep not in ids: problems.append(f"unknown dependency: {n['id']} ← {dep}")
     for n in nodes: problems += field_problems(n)
     nogoal=[n['id'] for n in nodes if not (n.get('goal') or '').strip()]
+    nocheck=[n['id'] for n in nodes if n.get('role') not in NO_CHECK_ROLES and not (n.get('check') or '').strip() and not (n.get('no_check') or '').strip()]
+    if nocheck: problems.append('build node(s) without a check: '+', '.join(nocheck)+'. Add --check "<command>" or --no-check "<reason>"')
     if nogoal: problems.append('missing goal on node(s): '+', '.join(nogoal)+'. Set one with: node <run> <id> --role <role> --status pending --goal "<what this node must achieve>"')
     graph={n['id']:[dep for dep in n.get('depends_on',[]) if dep in ids and dep!=n['id']] for n in nodes}
     done=set()
@@ -749,7 +815,7 @@ def cmd_validate(a):
         done.add(nid)
     for nid in graph: visit(nid,[])
     if problems:
-        CTX['msg']='; '.join(problems)[:500]; print('\n'.join(f'✖ {x}' for x in problems)); raise SystemExit(3 if nogoal else 1)
+        CTX['msg']='; '.join(problems)[:500]; print('\n'.join(f'✖ {x}' for x in problems)); raise SystemExit(3 if (nogoal or nocheck) else 1)
     print(f'✔ plan valid: {len(nodes)} nodes, all dependencies known, no cycles')
 
 def js(x): return json.dumps(x, ensure_ascii=True)
@@ -865,6 +931,8 @@ def cmd_context(a):
     d['context'] = {'at': now(), 'files': total, 'stale': stale, 'no_memory': 'memory index not found' in text}
     d['updated_at'] = now(); save(ROOT / a.run / 'state.json', d); print(text)
 
+NO_RULES = 'No user rules found [none]'
+
 def cmd_profile(a):
     _, d = load(a.run)
     text = (a.text or '').strip()
@@ -872,6 +940,10 @@ def cmd_profile(a):
     n = len(text.splitlines())
     if n > 10: die(2, f'Refused: the profile has {n} lines. Keep it to 10 lines or fewer.')
     if len(text) > 1200: die(2, f'Refused: the profile has {len(text)} characters. Keep it to 1200 or fewer.')
+    bad = [l for l in text.splitlines() if l.strip() and not re.search(r'\[[^\[\]]+\]\s*$', l)]
+    if bad: die(2, f'Refused: every profile line must end with its source in brackets, for example [~/.claude/CLAUDE.md], [memory] or [user said]. Missing on: {bad[0][:60]!r}.')
+    if (d.get('context') or {}).get('files') == 0 and text != NO_RULES:
+        die(2, f'Refused: context found no user files, so the profile must be exactly "{NO_RULES}". Or create the run with init --skip-context "<reason>".')
     d['profile'] = {'at': now(), 'text': text}
     d['updated_at'] = now(); save(ROOT / a.run / 'state.json', d); print('Profile recorded.')
 
@@ -921,7 +993,7 @@ def cmd_preflight(a):
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     try:
         import preflight
-        needs=[n.strip() for n in (a.needs or '').split(',') if n.strip()]
+        needs=[n.strip() for n in (a.needs or '').split(',') if n.strip() and n.strip().lower()!='none']
         info={}
         print(preflight.run_preflight(needs, a.refresh, a.with_accounts, a.json, info))
         CTX['preflight']=info
@@ -929,7 +1001,7 @@ def cmd_preflight(a):
     except Exception as e: print(f'preflight scan incomplete ({type(e).__name__}). Continue without it or retry with --refresh.')
 
 # ---- run log: .graph/runs/<id>/log.jsonl, append-only, one JSON line per command call ----
-LOG_ARGS = ('project_dir', 'text', 'note', 'why', 'skills', 'plugins', 'clis', 'mcp', 'task_text', 'auto_approve', 'skip_context', 'skip_preflight', 'goal', 'status', 'depends_on', 'check', 'target', 'risk', 'reason', 'command', 'type', 'needs', 'refresh',
+LOG_ARGS = ('project_dir', 'text', 'note', 'why', 'skills', 'plugins', 'clis', 'mcp', 'task_text', 'auto_approve', 'skip_context', 'skip_preflight', 'goal', 'no_check', 'status', 'depends_on', 'check', 'target', 'risk', 'reason', 'command', 'type', 'needs', 'refresh',
             'with_accounts', 'include_dependents')
 
 def log_path(run_id): return ROOT / run_id / 'log.jsonl'
@@ -1000,7 +1072,7 @@ def cmd_log(a):
 def main():
     ap=argparse.ArgumentParser();sp=ap.add_subparsers(required=True)
     x=sp.add_parser('init');x.add_argument('task');x.add_argument('--id');x.add_argument('--host');x.add_argument('--max-retries',type=int,default=2);x.add_argument('--quality-command',action='append');x.add_argument('--skip-preflight',metavar='REASON');x.add_argument('--skip-context',metavar='REASON');x.add_argument('--auto-approve',metavar='WORDS');x.set_defaults(fn=cmd_init)
-    x=sp.add_parser('node');x.add_argument('run');x.add_argument('node');x.add_argument('--role',required=True);x.add_argument('--status',required=True);x.add_argument('--depends-on',nargs='*');x.add_argument('--model');x.add_argument('--files',nargs='*');x.add_argument('--check');x.add_argument('--target');x.add_argument('--risk');x.add_argument('--goal');x.add_argument('--reason');x.add_argument('--check-timeout',type=int,default=300);x.set_defaults(fn=cmd_node,nolock=True)
+    x=sp.add_parser('node');x.add_argument('run');x.add_argument('node');x.add_argument('--role',required=True);x.add_argument('--status',required=True);x.add_argument('--depends-on',nargs='*');x.add_argument('--model');x.add_argument('--files',nargs='*');x.add_argument('--check');x.add_argument('--no-check',dest='no_check',metavar='REASON');x.add_argument('--target');x.add_argument('--risk');x.add_argument('--goal');x.add_argument('--reason');x.add_argument('--check-timeout',type=int,default=300);x.set_defaults(fn=cmd_node,nolock=True)
     x=sp.add_parser('brief');x.add_argument('run');x.add_argument('node');x.set_defaults(fn=cmd_brief,nolock=True)
     x=sp.add_parser('verify-plan');x.add_argument('run');x.add_argument('node');x.set_defaults(fn=cmd_verify_plan,nolock=True)
     x=sp.add_parser('next');x.add_argument('run');x.set_defaults(fn=cmd_next,nolock=True)

@@ -70,3 +70,13 @@ When a node goes to running, the runtime stores a git snapshot (HEAD, changed fi
 
 ## Export
 `export-workflow` writes a script for one run (a comment at the top says so). It calls graph.py by a project-relative path when the skill is installed in `.claude/skills/graph` or `.agents/skills/graph`, else by absolute path. The launcher is `python3`, or `py -3` / `python` on Windows. If preflight is not yet logged, the script starts with a preflight step.
+
+## Second end-to-end fixes
+
+- `init --auto-approve` is refused (exit 3, run still created without it) when the text is the task, part of it, or over 60% the same words, or has no go-ahead phrase (list: `GO_AHEAD` in `graph.py`).
+- `preflight --needs` accepts unknown needs ("no mapping for X, use your judgment", logged as `unmapped`) and `--needs none`.
+- The summary flags checks that use an absolute path outside the project, or install a tool outside it.
+- Files changed while 2+ nodes overlapped are stored as `shared_files` with `shared_with`. Files passed with `--files` stay the node's own.
+- `profile` lines must end with a source in brackets (exit 2 otherwise). With no user files found the text must be `No user rules found [none]`.
+- `validate` (and so `approve`) refuses build nodes (role not research, docs, review or design) with no `--check` and no `--no-check "<reason>"` (exit 3). Summary lists the reasons.
+- `init` and `preflight` share `preflight.detect_host`. `CODEX_*` variables win over `CLAUDECODE`. `init` stores `host_detected` next to `--host`.

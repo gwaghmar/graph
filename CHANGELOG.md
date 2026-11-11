@@ -4,6 +4,15 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed (second end-to-end test)
+- `--auto-approve` refuses task text and text with no go-ahead phrase.
+- `preflight --needs` accepts unknown needs and `none`.
+- Summary flags checks that depend on paths outside the project.
+- Overlapping nodes record shared files instead of crediting one node.
+- Profile lines need a source in brackets; no user files means "No user rules found [none]".
+- `validate` refuses build nodes without a check unless `--no-check "<reason>"`.
+- One shared host detection for `init` and `preflight`; Codex variables win over a leaked `CLAUDECODE`.
+
 ### Added
 - New start order: size, read the user, pick tools, work with the user, plan, show and approve, run, finish.
 - `context` (dated user files, stale memory notes flagged after 30 days), `profile`, `tools` (rank skills and plugins by word overlap, CLI and MCP picks), `choose`, `approve`, and `init --skip-context` / `--auto-approve`.
