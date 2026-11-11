@@ -174,16 +174,114 @@ function doctor(flags, cwd, home) {
   console.log(py ? `ok      Python found (${py})` : 'missing Python 3: install it so the runtime can run.');
 }
 
+// ---- statusline: opt-in helper that lets Graph read Claude Code usage left ----
+function tilde(text, home) {
+  return home ? text.split(home).join('~') : text;
+}
+
+function shellQuote(text) {
+  if (process.platform === 'win32') return '"' + text.replace(/"/g, '\\"') + '"';
+  return "'" + text.replace(/'/g, "'\\''") + "'";
+}
+
+function pythonLauncher() {
+  if (process.platform === 'win32') return commandExists('py') ? 'py -3' : 'python';
+  return commandExists('python3') || !commandExists('python') ? 'python3' : 'python';
+}
+
+// Path as written into settings.json. Under the home folder on Mac/Linux it is ~/..., which the shell expands.
+function commandPath(script, home) {
+  const safe = /^[A-Za-z0-9_./-]+$/;
+  if (process.platform !== 'win32' && script.startsWith(home + path.sep)) {
+    const rel = script.slice(home.length + 1).split(path.sep).join('/');
+    if (safe.test(rel)) return '~/' + rel;
+  }
+  return /[\s"'&|<>^()]/.test(script) ? shellQuote(script) : script;
+}
+
+function findStatuslineScript(flags, cwd, home) {
+  if (flags.script) return path.resolve(flags.script);
+  for (const base of [home, cwd]) {
+    const p = path.join(base, '.claude', 'skills', 'graph', 'scripts', 'statusline.py');
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+function statusline(flags, cwd, home) {
+  if (!flags.enable) {
+    console.log('graph-skill statusline --enable [--yes]\n\nThis is opt-in. It lets Graph read how much Claude Code usage is left.\n' +
+      'Without --yes it only prints the change to ~/.claude/settings.json. With --yes it writes it, after a backup.\n' +
+      'The helper stores only usage percentages, reset times, the model id and the context size. No message content.');
+    return;
+  }
+  const script = findStatuslineScript(flags, cwd, home);
+  if (!script || !fs.existsSync(script)) {
+    console.error('graph-skill: statusline.py not found. Run "graph-skill install --global" first, or pass --script <path>.');
+    process.exitCode = 1; return;
+  }
+  const settingsPath = path.join(home, '.claude', 'settings.json');
+  let settings = {};
+  if (fs.existsSync(settingsPath)) {
+    try { settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8').replace(/^﻿/, '')); } catch (e) {
+      console.error(`graph-skill: ${tilde(settingsPath, home)} is not plain JSON, so nothing was changed. Add the statusLine entry by hand.`);
+      process.exitCode = 1; return;
+    }
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+      console.error(`graph-skill: ${tilde(settingsPath, home)} is not a JSON object, so nothing was changed.`);
+      process.exitCode = 1; return;
+    }
+  }
+  const base = `${pythonLauncher()} ${commandPath(script, home)}`;
+  const old = settings.statusLine;
+  let entry;
+  if (old !== undefined && old !== null) {
+    if (typeof old !== 'object' || old.type !== 'command' || typeof old.command !== 'string' || !old.command.trim()) {
+      console.error('graph-skill: the existing statusLine is not a plain command, so it was left alone. Wrap it by hand: pass its command as the argument of statusline.py.');
+      process.exitCode = 1; return;
+    }
+    if (/skills[\\/]graph[\\/]scripts[\\/]statusline\.py/.test(old.command)) {
+      console.log('Already enabled: the statusLine already runs the Graph helper. Nothing to do.');
+      return;
+    }
+    entry = Object.assign({}, old, { type: 'command', command: `${base} ${shellQuote(old.command)}` });
+  } else {
+    entry = { type: 'command', command: base };
+  }
+  console.log(`Settings change for ${tilde(settingsPath, home)}:`);
+  console.log(JSON.stringify({ statusLine: entry }, null, 2));
+  if (old) console.log('Your existing statusLine command is kept: the helper runs it and shows its output.');
+  if (!flags.yes) {
+    console.log('\nNothing was written. Run again with --yes to apply it. A backup is made first.');
+    return;
+  }
+  if (fs.existsSync(settingsPath)) {
+    const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+    const backup = `${settingsPath}.graph-skill-backup-${stamp}`;
+    fs.copyFileSync(settingsPath, backup);
+    console.log(`Backup: ${tilde(backup, home)}`);
+  } else {
+    fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+  }
+  settings.statusLine = entry;
+  const tmp = `${settingsPath}.graph-skill-tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(settings, null, 2) + '\n', 'utf8');
+  fs.renameSync(tmp, settingsPath);
+  console.log(`Enabled. Restart Claude Code. To undo, restore the backup or remove the statusLine entry.`);
+}
+
 function help() {
-  console.log('graph-skill\n\nUsage:\n  graph-skill install [--global]\n  graph-skill update [--global]\n  graph-skill uninstall [--global]\n  graph-skill doctor');
+  console.log('graph-skill\n\nUsage:\n  graph-skill install [--global]\n  graph-skill update [--global]\n  graph-skill uninstall [--global]\n  graph-skill doctor\n  graph-skill statusline --enable [--yes] [--script path]');
 }
 
 function main(argv) {
   const command = argv[0] || 'help';
-  const flags = { global: argv.includes('--global') };
+  const flags = { global: argv.includes('--global'), enable: argv.includes('--enable'), yes: argv.includes('--yes') };
+  const si = argv.indexOf('--script');
+  if (si !== -1) flags.script = argv[si + 1];
   const cwd = process.cwd();
   const home = os.homedir();
-  const fns = { install, update, uninstall, doctor };
+  const fns = { install, update, uninstall, doctor, statusline };
   if (fns[command]) fns[command](flags, cwd, home); else help();
 }
 

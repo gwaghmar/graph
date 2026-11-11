@@ -31,7 +31,7 @@ class UsageCase(Base):
         self.init()
 
     def init(self):
-        self.g('init', 'task', '--id', 'r1', '--skip-preflight', 'test', '--skip-context', 'test', '--auto-approve', 'just do it')
+        self.g('init', 'task', '--id', 'r1', '--skip-preflight', 'test', '--skip-context', 'test', '--skip-budget', 'test', '--auto-approve', 'just do it')
 
     def prices(self, models, as_of=None):
         write(self.home / '.cache/graph-skill/prices.json', json.dumps({'as_of': as_of or time.strftime('%Y-%m-%d', time.gmtime()), 'models': models}))

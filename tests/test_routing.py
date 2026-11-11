@@ -59,7 +59,7 @@ class RoutingBase(Base):
     def calls(self, count): return len(count.read_text()) if count.exists() else 0
 
     def start(self, *extra):
-        self.g('init', 'task', '--id', 'r1', '--skip-preflight', 't', '--skip-context', 't', '--auto-approve', 'just do it', *extra)
+        self.g('init', 'task', '--id', 'r1', '--skip-preflight', 't', '--skip-context', 't', '--skip-budget', 't', '--auto-approve', 'just do it', *extra)
 
     def add(self, nid, role, *extra, status='pending', code=0):
         return self.g('node', 'r1', nid, '--role', role, '--status', status, '--goal', 'g', '--no-check', 'none', *extra, code=code)

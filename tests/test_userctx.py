@@ -41,7 +41,7 @@ class Base(unittest.TestCase):
         return r
 
     def init(self, *extra, rid='r1'):
-        self.g('init', 'task', '--id', rid, '--skip-preflight', 'test', *extra)
+        self.g('init', 'task', '--id', rid, '--skip-preflight', 'test', '--skip-budget', 'test', *extra)
 
     def state(self, rid='r1'):
         return json.loads((self.proj / f'.graph/runs/{rid}/state.json').read_text(encoding='utf-8'))

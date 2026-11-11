@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from preflight import run_proc
-import userctx, usage, routing
+import userctx, usage, routing, budget
 
 ROOT = Path('.graph/runs')
 STATUSES = ('pending', 'running', 'retrying', 'complete', 'failed', 'skipped', 'cached')
@@ -99,6 +99,7 @@ def auto_approve_problem(words_text, task):
 def cmd_init(a):
     if a.max_retries < 0: die(2, '--max-retries must be 0 or more.')
     if a.skip_preflight is not None and not a.skip_preflight.strip(): die(2, '--skip-preflight needs a reason, for example --skip-preflight "user declined".')
+    if a.skip_budget is not None and not a.skip_budget.strip(): die(2, '--skip-budget needs a reason, for example --skip-budget "user declined".')
     for flag, val in (('--skip-context', a.skip_context), ('--auto-approve', a.auto_approve)):
         if val is not None and not val.strip():
             die(2, f'{flag} needs text. For --skip-context give a reason. For --auto-approve give the exact words the user said that allow going ahead without review.')
@@ -112,12 +113,13 @@ def cmd_init(a):
     ensure_ignore()
     p = ROOT / rid / 'state.json'
     data = {
-        'schema_version': 4, 'id': rid, 'run_date': userctx.today_utc(), 'task': a.task, 'host': host, 'host_detected': detected, 'max_retries': a.max_retries,
+        'schema_version': 5, 'id': rid, 'run_date': userctx.today_utc(), 'task': a.task, 'host': host, 'host_detected': detected, 'max_retries': a.max_retries,
         'quality_commands': a.quality_command or [], 'status': 'planning', 'created_at': now(), 'updated_at': now(),
         'git': git_info(), 'nodes': [], 'events': [], 'quality': []
     }
     if a.skip_preflight: data['skip_preflight'] = a.skip_preflight.strip()
     if a.skip_context: data['skip_context'] = a.skip_context.strip()
+    if a.skip_budget: data['skip_budget'] = a.skip_budget.strip()
     if a.auto_approve and not refuse_auto: data['auto_approve'] = a.auto_approve.strip()
     save(p, data); render_files(p, data); print(rid)
     if a.host and detected not in ('unknown',) and a.host.lower() != detected.split(' ')[0].lower():
@@ -188,6 +190,9 @@ def plan_hash(d):
     rows = sorted((n['id'], sorted(n.get('depends_on', [])), (n.get('goal') or '').strip(), n.get('check') or '') + ((n['needs'],) if n.get('needs') else ()) for n in d.get('nodes', []))
     return hashlib.sha256(json.dumps(rows, ensure_ascii=True).encode('utf-8')).hexdigest()[:16]
 
+def budget_missing(d):
+    return d.get('schema_version', 3) >= 5 and not d.get('skip_budget') and not d.get('budget')
+
 def start_gaps(d):
     """Steps still missing before any node may start, as (key, text). Runs made before schema 4 only need preflight."""
     c, rid, gaps = graph_cmd(), d['id'], []
@@ -201,6 +206,9 @@ def start_gaps(d):
                                     f"(or create the run with init --skip-context \"<reason>\" if this host has no user files)"))
         if not d.get('toolkit'):
             gaps.append(('choose', f"choose: run {c} tools --run {rid} --task \"<task>\", then {c} choose --run {rid} --skills a,b --clis gh --why \"<one line>\""))
+    if budget_missing(d):
+        gaps.append(('budget', f"budget: run {c} budget --run {rid}. If it prints unknown, ask the user how much usage is left and when it resets, then add --left-pct N --resets HH:MM  "
+                               f"(or create the run with init --skip-budget \"<reason>\" if the user declined it)"))
     ap = d.get('approval')
     if ap and not d.get('auto_approve') and ap.get('plan') and ap['plan'] != plan_hash(d):
         gaps.append(('approve', f"approve: the plan changed after approval. Re-show the plan to the user, and only after they say go run {graph_cmd()} approve --run {d['id']} --note \"<the user's words>\""))
@@ -271,6 +279,8 @@ def guard(a, d, n):
     if a.status in ('running', 'retrying'):
         gaps = start_gaps(d)
         if gaps: die(3, gap_message(d, gaps, 'start a node'))
+        wait = deferral(d, a.node, a.depends_on if a.depends_on is not None else (n or {}).get('depends_on', []))
+        if wait: die(3, f"Refused: {a.node} is on level {wait['level']}, which is deferred until {budget.local_time(wait['not_before'])} (local time, {wait['iso']}) because the usage budget does not cover it now. Do not start it before then. Run resume after that time.")
     if a.status == 'skipped' and not (a.reason or (n or {}).get('skip_reason')):
         die(3, f"Refused: skipping {a.node} needs a reason. Add --reason \"<why>\".")
     old_deps = (n or {}).get('depends_on', [])
@@ -435,11 +445,22 @@ def cmd_verify_plan(a):
         print(f"High risk: after step 1 passes, escalate one step to step 2 ({steps[1][0]}).")
     elif risk == 'high': print('High risk: step 2 is not available here, use the workaround and report it.')
 
+def deferral(d, node_id, deps):
+    """{level, not_before, iso} when this node sits in a deferred level that cannot start yet, else None."""
+    df = d.get('deferred')
+    if not isinstance(df, dict) or epoch() >= df.get('not_before', 0): return None
+    lv = node_levels(d)
+    level = lv[node_id] + 1 if node_id in lv else 1 + max([lv.get(x, 0) + 1 for x in deps] or [0])
+    return {'level': level, 'not_before': df['not_before'], 'iso': df.get('iso', '')} if level >= df.get('from_level', 10**9) else None
+
 def cmd_next(a):
     _, d = load(a.run); limit = d.get('max_retries', 2) + 1
     ready = [n['id'] for n in d.get('nodes', []) if not unmet(d, n) and (
         n.get('status') == 'pending' or (n.get('status') == 'failed' and n.get('attempts', 0) < limit))]
-    print('\n'.join(ready) if ready else 'none')
+    def show(i):
+        w = deferral(d, i, (get_node(d, i) or {}).get('depends_on', []))
+        return f"{i}  (waiting until {budget.local_time(w['not_before'])})" if w else i
+    print('\n'.join(show(i) for i in ready) if ready else 'none')
 
 def cmd_event(a):
     p,d=load(a.run); d['events'].append({'at':now(),'type':a.type,'message':a.message});d['updated_at']=now();save(p,d);render_files(p,d)
@@ -656,6 +677,7 @@ def build_summary(d):
     if not checks and not any(l.startswith('- Node') for l in L[L.index('## What was checked'):]): L.append('- No check ran.')
     L+=['','## How it ran','',parallel_line(d)]
     L+=['','## Tokens and cost','']+usage.report_lines(d['usage'] if 'usage' in d else None)
+    L+=['','## Usage budget','']+budget.report_lines(d)
     L+=['','## Model routing','']+routing.report_lines(d)
     L+=['','## What failed','']
     out=failure_history(d)
@@ -851,6 +873,11 @@ def cmd_export_workflow(a):
     if gaps: die(3, gap_message(d, gaps, 'export the workflow'))
     levels = node_levels(d); by = {}
     for n in nodes: by.setdefault(levels[n['id']], []).append(n)
+    df = d.get('deferred'); held = []
+    if isinstance(df, dict) and epoch() < df.get('not_before', 0):
+        held = [k for k in by if k + 1 >= df['from_level']]
+        for k in held: del by[k]
+        if not by: die(3, f"Refused: every level is deferred until {budget.local_time(df['not_before'])}. Nothing can run now.")
     g = graph_cmd()
     def mark(n, status): return f"{g} node {shlex.quote(a.run)} {shlex.quote(n['id'])} --role {shlex.quote(n.get('role') or 'worker')} --status {status}"
     def prompt(n):
@@ -890,7 +917,8 @@ def cmd_export_workflow(a):
                 f'    log("Node failed or returned nothing at {title(i)}. Stopping so dependents do not start.")',
                 f"    await agent({js('Run: ' + g + ' finish ' + shlex.quote(a.run) + ' --status failed')}, {{ label: 'mark-failed' }})",
                 '    stopped = true', '  }', '}', '']
-    out += ['if (!stopped) {', f"  await agent({js('Run: ' + g + ' quality ' + shlex.quote(a.run) + ' then ' + g + ' finish ' + shlex.quote(a.run) + ' --status complete')}, {{ label: 'finish' }})", '}', '']
+    if held: out += [f"log({js('Levels ' + str(df['from_level']) + ' and higher wait until ' + budget.local_time(df['not_before']) + ' (usage budget). Run resume then, and export again.')})"]
+    else: out += ['if (!stopped) {', f"  await agent({js('Run: ' + g + ' quality ' + shlex.quote(a.run) + ' then ' + g + ' finish ' + shlex.quote(a.run) + ' --status complete')}, {{ label: 'finish' }})", '}', '']
     path = Path(a.out) if a.out else Path('.claude/workflows') / f'graph-{a.run}.js'
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text('\n'.join(out), encoding='utf-8')
@@ -922,7 +950,14 @@ def cmd_resume(a):
             p,d=load(d['id']); d['status']='running'; d.pop('finished_at',None)
             d['events'].append({'at':now(),'type':'resume','message':'reopened a failed run'}); d['updated_at']=now(); save(p,d); render_files(p,d)
     CTX['run']=d['id']
-    print(json.dumps({'run':d['id'],'task':d['task'],'status':d['status'],'graph':str(ROOT/d['id']/'graph.html')},indent=2))
+    out={'run':d['id'],'task':d['task'],'status':d['status'],'graph':str(ROOT/d['id']/'graph.html')}
+    if d.get('deferred') and not d.get('skip_budget'):
+        df=d['deferred']
+        out['deferred']=(f"Levels {df['from_level']}+ wait until {budget.local_time(df['not_before'])}." if epoch()<df['not_before'] else f"The deferral time has passed. Levels {df['from_level']}+ can start.")
+        with run_lock(d['id']):
+            p,d=load(d['id']); d['budget']=fresh_budget(d); save(p,d)
+        out['budget']=[tilde(x) for x in budget.lines(d['budget'])]
+    print(json.dumps(out,indent=2))
 
 def git_info():
     def run(*args):
@@ -944,6 +979,9 @@ def cmd_finish(a):
         if not any(x.get('status')=='passed' for x in req.values()):
             status='complete-unverified'; print('No required quality check passed: run recorded as complete-unverified.')
     d['usage']=usage.collect(d, Path.home(), Path.cwd())
+    with contextlib.suppress(Exception):
+        tot=(d['usage'].get('totals') or {}) if d['usage'].get('status')=='ok' else {}
+        budget.finish(d, Path.home(), epoch(), budget_host(d), budget.fresh(tot))
     with contextlib.suppress(Exception): usage.write_history(Path.home(), usage.history_entries(d, d['usage']))
     d['status']=status; d['finished_at']=now(); d['updated_at']=now()
     d['verify_steps']=verify_plans(d)
@@ -1065,6 +1103,48 @@ def cmd_choose(a):
     for m in miss: print(f'  {m}: not found on this machine')
     for m in off: print(f'  {m}: turned off. Ask the user before turning it on.')
 
+def budget_host(d, host=None):
+    h = usage.host_key(host if host and host != 'auto' else None)
+    if h != 'unknown': return h
+    for src in (d.get('host_detected'), d.get('host')):
+        h = usage.host_key(src)
+        if h != 'unknown': return h
+    return 'unknown'
+
+def fresh_budget(d, a=None):
+    """Recompute the budget record from the current plan. A before-run answer from the user is kept."""
+    b = budget.build(d, {k: v + 1 for k, v in node_levels(d).items()}, Path.home(), epoch(), budget_host(d, getattr(a, 'host', None)), d.get('budget_user'))
+    return b
+
+def cmd_budget(a):
+    p, d = load(a.run)
+    if d.get('skip_budget'): print(f"The budget step was skipped for this run: {d['skip_budget']}"); return
+    if (a.left_pct is None) != (a.resets is None): die(2, 'Give both --left-pct N and --resets HH:MM, or neither.')
+    if a.left_pct is not None:
+        if not 0 <= a.left_pct <= 100: die(2, '--left-pct must be between 0 and 100.')
+        at = budget.parse_hhmm(a.resets, epoch())
+        if at is None: die(2, f'--resets must be a local time like 14:30, not {a.resets!r}.')
+        d['budget_user'] = {'left_pct': a.left_pct, 'resets_at': at, 'at_epoch': epoch(), 'at': now()}
+    d['budget'] = fresh_budget(d, a)
+    if a.left_pct is not None and not any(w['source'] == 'user' for w in d['budget']['before']):
+        print('Note: the host source works, so the user answer was recorded but not used.')
+    d['updated_at'] = now(); save(p, d)
+    print('\n'.join(tilde(x) for x in budget.lines(d['budget'])))
+
+def cmd_defer(a):
+    p, d = load(a.run)
+    if not d.get('nodes'): die(2, f'Run {a.run} has no nodes. Add the plan first.')
+    top = max(node_levels(d).values()) + 1
+    if not 1 <= a.from_level <= top: die(2, f'--from-level must be between 1 and {top} (the plan has {top} levels).')
+    at = usage.epoch_of(a.not_before)
+    if at is None: die(2, f'--not-before must be an ISO time like 2026-11-10T14:30 (local) or 2026-11-10T14:30Z, not {a.not_before!r}.')
+    started = [n['id'] for n in d['nodes'] if n.get('status') != 'pending' and node_levels(d)[n['id']] + 1 >= a.from_level]
+    if started: die(3, f"Refused: nodes {', '.join(started)} on level {a.from_level} or higher already started, so they cannot be deferred.")
+    d['deferred'] = {'from_level': a.from_level, 'not_before': at, 'iso': budget.local_iso(at), 'at': now()}
+    d['updated_at'] = now(); save(p, d)
+    print(f"Deferred: nodes on level {a.from_level} and higher will not start before {budget.local_time(at)} (local time). Levels 1-{a.from_level - 1} can run now.")
+    print(f"This is a suggestion only. Nothing is scheduled: run {graph_cmd()} resume at that time to re-read the usage.")
+
 def cmd_approve(a):
     _, d = load(a.run)
     note = (a.note or '').strip()
@@ -1075,8 +1155,11 @@ def cmd_approve(a):
         with contextlib.redirect_stdout(buf): cmd_validate(argparse.Namespace(run=a.run))
     except SystemExit:
         die(3, f'Refused: plan for {a.run} is not valid. Fix it until "validate {a.run}" passes, show it again, then approve.\n' + buf.getvalue().rstrip())
+    if budget_missing(d): die(3, f'Refused: the budget step is missing. Run {graph_cmd()} budget --run {a.run} first, or create the run with init --skip-budget "<reason>".')
     d['approval'] = {'at': now(), 'note': note[:500], 'plan': plan_hash(d)}
+    if not d.get('skip_budget') and d.get('schema_version', 3) >= 5: d['budget'] = fresh_budget(d, a)
     d['updated_at'] = now(); save(ROOT / a.run / 'state.json', d); print('Approval recorded.')
+    if d.get('budget'): print('\n'.join(tilde(x) for x in budget.lines(d['budget'])))
 
 def cmd_preflight(a):
     ensure_ignore()
@@ -1092,7 +1175,7 @@ def cmd_preflight(a):
 
 # ---- run log: .graph/runs/<id>/log.jsonl, append-only, one JSON line per command call ----
 LOG_ARGS = ('project_dir', 'text', 'note', 'why', 'skills', 'plugins', 'clis', 'mcp', 'task_text', 'auto_approve', 'skip_context', 'skip_preflight', 'goal', 'no_check', 'status', 'depends_on', 'check', 'target', 'risk', 'reason', 'command', 'type', 'needs', 'refresh',
-            'with_accounts', 'include_dependents', 'host', 'session', 'needs', 'effort', 'model')
+            'with_accounts', 'include_dependents', 'skip_budget', 'left_pct', 'resets', 'from_level', 'not_before', 'host', 'session', 'needs', 'effort', 'model')
 
 def log_path(run_id): return ROOT / run_id / 'log.jsonl'
 
@@ -1163,7 +1246,7 @@ def cmd_log(a):
 
 def main():
     ap=argparse.ArgumentParser();sp=ap.add_subparsers(required=True)
-    x=sp.add_parser('init');x.add_argument('task');x.add_argument('--id');x.add_argument('--host');x.add_argument('--max-retries',type=int,default=2);x.add_argument('--quality-command',action='append');x.add_argument('--skip-preflight',metavar='REASON');x.add_argument('--skip-context',metavar='REASON');x.add_argument('--auto-approve',metavar='WORDS');x.set_defaults(fn=cmd_init)
+    x=sp.add_parser('init');x.add_argument('task');x.add_argument('--id');x.add_argument('--host');x.add_argument('--max-retries',type=int,default=2);x.add_argument('--quality-command',action='append');x.add_argument('--skip-preflight',metavar='REASON');x.add_argument('--skip-context',metavar='REASON');x.add_argument('--auto-approve',metavar='WORDS');x.add_argument('--skip-budget',metavar='REASON');x.set_defaults(fn=cmd_init)
     x=sp.add_parser('node');x.add_argument('run');x.add_argument('node');x.add_argument('--role',required=True);x.add_argument('--status',required=True);x.add_argument('--depends-on',nargs='*');x.add_argument('--model');x.add_argument('--needs');x.add_argument('--effort');x.add_argument('--files',nargs='*');x.add_argument('--check');x.add_argument('--no-check',dest='no_check',metavar='REASON');x.add_argument('--target');x.add_argument('--risk');x.add_argument('--goal');x.add_argument('--reason');x.add_argument('--check-timeout',type=int,default=300);x.set_defaults(fn=cmd_node,nolock=True)
     x=sp.add_parser('brief');x.add_argument('run');x.add_argument('node');x.set_defaults(fn=cmd_brief,nolock=True)
     x=sp.add_parser('verify-plan');x.add_argument('run');x.add_argument('node');x.set_defaults(fn=cmd_verify_plan,nolock=True)
@@ -1188,6 +1271,8 @@ def main():
     x=sp.add_parser('profile');x.add_argument('--run',required=True);x.add_argument('--text');x.set_defaults(fn=cmd_profile)
     x=sp.add_parser('tools');x.add_argument('--run',required=True);x.add_argument('--task',dest='task_text');x.set_defaults(fn=cmd_tools,nolock=True)
     x=sp.add_parser('choose');x.add_argument('--run',required=True);x.add_argument('--skills');x.add_argument('--plugins');x.add_argument('--clis');x.add_argument('--mcp');x.add_argument('--why');x.set_defaults(fn=cmd_choose)
+    x=sp.add_parser('budget');x.add_argument('--run',required=True);x.add_argument('--left-pct',type=float);x.add_argument('--resets');x.add_argument('--host',default='auto');x.set_defaults(fn=cmd_budget)
+    x=sp.add_parser('defer');x.add_argument('run');x.add_argument('--from-level',type=int,required=True);x.add_argument('--not-before',required=True);x.set_defaults(fn=cmd_defer)
     x=sp.add_parser('approve');x.add_argument('--run',required=True);x.add_argument('--note');x.set_defaults(fn=cmd_approve)
     x=sp.add_parser('preflight');x.add_argument('--run');x.add_argument('--needs');x.add_argument('--refresh',action='store_true');x.add_argument('--with-accounts',action='store_true');x.add_argument('--json',action='store_true');x.set_defaults(fn=cmd_preflight,nolock=True)
     a=ap.parse_args()

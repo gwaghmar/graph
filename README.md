@@ -76,11 +76,13 @@ In normal use the agent runs these for you. Type `/graph <task>` on Claude Code,
 |---|---|
 | `preflight --needs a,b [--refresh] [--with-accounts] [--json] [--run id]` | Scan the environment, pick tools (`--run` logs it; nodes cannot start until it is logged) |
 | `log <run> [--refusals] [--node X] [--json]` | Show what the run did and what the rules refused |
-| `init "<task>" [--host H] [--max-retries N] [--skip-preflight R] [--skip-context R] [--auto-approve WORDS]` | Start a run |
+| `init "<task>" [--host H] [--max-retries N] [--skip-preflight R] [--skip-context R] [--skip-budget R] [--auto-approve WORDS]` | Start a run |
 | `context --run id` | Read the user: dated list of global, project and memory files, stale notes flagged |
 | `profile --run id --text "..."` | Record how this user works (10 lines max) |
 | `tools --run id --task "..."` | Rank skills and plugins for the task, show CLI and MCP picks |
 | `choose --run id [--skills --plugins --clis --mcp] --why "..."` | Record the chosen toolkit |
+| `budget --run id [--left-pct N --resets HH:MM] [--host auto]` | Usage left per window with reset time, plan estimate, and a recommendation. Required before approve. `--left-pct` records the user's answer when the host gives no usage |
+| `defer <run> --from-level N --not-before ISO` | Refuse starting nodes on level N and up until that time. A printed suggestion: nothing is scheduled |
 | `approve --run id --note "..."` | Record the user's go-ahead, in their words |
 | `node <run> <id> --role R --status S [...]` | Add or update a node, with rule checks |
 | `validate <run>` | Reject bad dependencies |
@@ -112,6 +114,10 @@ Before any node runs, the agent follows this order:
 The first node start is refused (exit 3) until preflight, profile, choose and approve are recorded. The refusal lists exactly what is missing. Escape hatches, all logged: `init --skip-preflight "<reason>"`, `--skip-context "<reason>"` (hosts with no user files, waives profile and choose) and `--auto-approve "<the user's words>"` (the user already said to go ahead; task text or text without a go-ahead phrase is refused).
 
 Honest limit: the runtime cannot prove that an approval came from a human. It only records the text the agent passes. The log is a plain local file. The gates stop an agent from skipping steps by accident, not from lying.
+
+Usage budget: `budget` reads usage left from the host: Codex from the newest `~/.codex/sessions` rollout file (`rate_limits`), Claude Code from `~/.cache/graph-skill/claude-rate-limits.json`. A refilled Codex window counts as 0% used. Other hosts are unknown, so you ask the user and record the answer. Estimates come from your own `~/.config/graph-skill/history.jsonl` by (tier, role) when there are 5 or more samples, else from the shipped defaults, labeled "default, not your history". Tokens turn into percent only after 3 finished runs on that host and window (learned in `~/.config/graph-skill/budget-calib.jsonl`). Everything is approximate. The summary shows usage before and after, and estimate against actual per node.
+
+Claude Code statusline helper (opt-in): `npx graph-skill statusline --enable` prints the `settings.json` change. `--yes` writes it after a backup and wraps any statusLine you already have. It stores only usage percentages, reset times, the model id and the context size. Without it, Claude Code usage left is unknown.
 
 Token ledger: `usage` reads usage numbers, model ids, timestamps and ids from Claude Code transcripts (`~/.claude/projects/<project>/`, including subagent files) and Codex sessions (`~/.codex/sessions/`). It never reads message content, secrets or tokens. Cost is the API-price equivalent. On a subscription you pay your plan, not this. Other hosts show tokens as unknown. `finish` adds the table to the summary and appends one line per finished node (date, host, role, tokens, duration) to `~/.config/graph-skill/history.jsonl`.
 

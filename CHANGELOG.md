@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added (usage budget)
+- `budget --run <id>`: usage left per window with local reset time (Codex rollout files, or the Claude Code statusline cache), a plan estimate by (tier, role) from your history with shipped defaults under 5 samples, and a recommendation (all now, lighter tier, levels 1-N now, or the user decides). The step is required before approve and node start. `init --skip-budget "<reason>"` waives it.
+- `budget --left-pct N --resets HH:MM` records the user's answer when the host gives no usage.
+- Tokens per percent are learned per host and window from finished runs (3 needed). Until then the report says "cannot convert to % yet".
+- `defer <run> --from-level N --not-before <ISO>`: nodes in those levels are refused (exit 3) until the time, `next` shows the wait, `resume` re-reads usage, `export-workflow` exports only levels that can run now. Nothing is scheduled.
+- The summary reports usage before and after per window, and estimate against actual per node with error percent.
+- `scripts/statusline.py` and `graph-skill statusline --enable [--yes]`: opt-in helper that writes usage numbers to a cache atomically and can wrap an existing statusLine. Settings are only written with `--yes`, after a backup.
+
 ### Added (capability tiers)
 - Route by capability tier, not model name: `node --needs deep|build|quick --effort low|medium|high`, derived from the role when omitted. `--model` stays as a logged manual override.
 - `models [--refresh] [--host]` and `resolve <run> <node>`: user `tiers.json` first, then the Codex or OpenCode catalog (cached 24 hours) or Claude Code aliases from `scripts/capabilities.json`, ranked with models.dev. Unknown means "host default, routing not applied".
