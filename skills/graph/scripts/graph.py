@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from preflight import run_proc
-import userctx, usage, routing, budget, outside
+import userctx, usage, routing, budget, outside, checkpoint
 
 ROOT = Path('.graph/runs')
 STATUSES = ('pending', 'running', 'retrying', 'complete', 'failed', 'skipped', 'cached')
@@ -16,9 +16,17 @@ RUN_ID = re.compile(r'^[A-Za-z0-9_-]+$')
 # What the current command did, collected for the run log (see write_log).
 CTX = {'msg': None, 'checks': [], 'run': None, 'preflight': None, 'route': None}
 
+SIZES = ('small', 'medium', 'large')
+
 def die(code, msg):
+    msg = tilde(msg)
     CTX['msg'] = msg
+    if code == 3:
+        on = checkpoint.color_on(sys.stderr)
+        print(checkpoint.paint('✖ STOPPED', '1;31', on), file=sys.stderr)
     print(msg, file=sys.stderr); raise SystemExit(code)
+
+def size_of(d): return d.get('size') if d.get('size') in SIZES else 'medium'
 
 
 def now(): return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
@@ -191,7 +199,7 @@ def plan_hash(d):
     return hashlib.sha256(json.dumps(rows, ensure_ascii=True).encode('utf-8')).hexdigest()[:16]
 
 def budget_missing(d):
-    return d.get('schema_version', 3) >= 5 and not d.get('skip_budget') and not d.get('budget')
+    return d.get('schema_version', 3) >= 5 and size_of(d) != 'small' and not d.get('skip_budget') and not d.get('budget')
 
 def start_gaps(d):
     """Steps still missing before any node may start, as (key, text). Runs made before schema 4 only need preflight."""
@@ -200,7 +208,8 @@ def start_gaps(d):
         gaps.append(('preflight', f"preflight: run {c} preflight --run {rid} --needs <comma list>  "
                                   f"(or create the run with init --skip-preflight \"<reason>\" if the user declined it)"))
     if d.get('schema_version', 3) < 4: return gaps
-    if not d.get('skip_context'):
+    small = size_of(d) == 'small'
+    if not d.get('skip_context') and not small:
         if not d.get('profile'):
             gaps.append(('profile', f"profile: read the user with {c} context --run {rid}, then run {c} profile --run {rid} --text \"<how this user works, 10 lines max>\"  "
                                     f"(or create the run with init --skip-context \"<reason>\" if this host has no user files)"))
@@ -215,6 +224,9 @@ def start_gaps(d):
     elif not (ap or d.get('auto_approve')):
         gaps.append(('approve', f"approve: show the plan to the user, and only after they say go run {c} approve --run {rid} --note \"<the user's words>\"  "
                                 f"(or create the run with init --auto-approve \"<the user's words>\" if they already said to go ahead without review)"))
+    gaps += [('outside', g) for g in outside_gaps(d)]
+    if size_of(d) == 'large' and not d.get('checkpoint_built'):
+        gaps.append(('checkpoint', f"checkpoint: this is a large job. Run {c} checkpoint --run {rid} --serve (or --terminal) so the user can keep or drop items"))
     return gaps
 
 def tilde(text):
@@ -224,7 +236,7 @@ def tilde(text):
     return text
 
 def gap_message(d, gaps, what):
-    return tilde(f"Refused: cannot {what} for {d['id']}. Missing steps:\n" + '\n'.join('  - ' + t for _, t in gaps) + '\nDo them, then try again.')
+    return tilde(f"Refused: cannot {what} for {d['id']}. Missing steps:\n👉 Do this:\n" + '\n'.join(f'  {i}. {t}' for i, (_, t) in enumerate(gaps, 1)) + '\nThen try again.')
 
 # ---- file auto-record: git snapshot at start, diff at end ----
 def _git(args, top=None):
@@ -607,8 +619,10 @@ def run_info(d):
     kit=d.get('toolkit'); ap=d.get('approval')
     toolkit='- Toolkit: '+('; '.join(f"{k} {', '.join(kit[k])}" for k in ('skills','plugins','clis','mcp') if kit.get(k)) or 'no extra tools')+f". Why: {short(kit['why'],80)}" if kit else '- Toolkit: not recorded.'
     approval=f"- Approval: {short(ap['note'],120)}" if ap else f"- Approval: skipped, the user said: {short(d['auto_approve'],120)}" if d.get('auto_approve') else '- Approval: not recorded.'
-    return [f"- Run date: {d.get('run_date') or 'unknown'}", f"- Stale context flagged: {st}", toolkit, approval,
-            '- The runtime records the approval text. It cannot prove a human wrote it.']
+    src=(ap or {}).get('source')
+    how=('- Approval source: pressed GO at the checkpoint'+(f" (dropped: {short(', '.join(ap['drops']),100)})" if ap.get('drops') else '')+'.') if src=='checkpoint' else '- Approval source: recorded by the model. The runtime cannot prove a human wrote the note.' if ap else None
+    return [f"- Run date: {d.get('run_date') or 'unknown'}", f"- Size: {size_of(d)}", f"- Stale context flagged: {st}", toolkit, approval]+([how] if how else [])+(
+            ['- The runtime records the approval text. It cannot prove a human wrote it.'] if src!='checkpoint' else [])
 
 ABS_PATH = re.compile(r'''(?<![\w.~$:/\\-])((?:/|[A-Za-z]:[\\/])[^\s'"`;|&<>()=,]+)''')
 SYSTEM_PREFIXES = ('/dev/', '/bin/', '/usr/bin/', '/usr/sbin/', '/sbin/', '/proc/')
@@ -632,6 +646,19 @@ def outside_paths(d):
         if INSTALL_RE.search(cmd) and (nid, 'a tool installed during the run') not in out: out.append((nid, 'a tool installed during the run'))
     return out
 
+def summary_top(d,status,said,todo):
+    """Big one-line status, then at most 3 things to do, then a divider. The details follow."""
+    if 'open problems' in said: head='⚠ DO NOT TRUST THIS'
+    else: head={'complete':'✔ DONE','complete-unverified':'⚠ DONE, NOT PROVEN','failed':'✖ FAILED'}.get(status,'… NOT FINISHED')
+    items=[t[2:] if t.startswith('- ') else t for t in todo if t not in ('- Nothing to do.',)]
+    items=[i for i in items if not i.startswith('Nothing')] if status!='complete' or items else items
+    L=[f'# {head}','',short(said.split('. ')[0].rstrip('.')+'.',100),'','## 👉 Do this:','']
+    if not items: L.append('Nothing. You are done.' if status in ('complete','complete-unverified') else 'Read the details below.')
+    else:
+        L+=[f'{i}. {short(t,140)}' for i,t in enumerate(items[:3],1)]
+        if len(items)>3: L.append(f'+{len(items)-3} more in "What you must do next" below.')
+    return '\n'.join(L+['','---',''])+'\n'
+
 def build_summary(d):
     """Plain-language run summary built only from state. Short sentences, no claim the state does not show."""
     nodes=d.get('nodes',[]); status=d.get('status','unknown')
@@ -652,7 +679,7 @@ def build_summary(d):
     if status=='complete' and (failed or open_ or badq): said='The run says complete, but the state shows open problems. Do not trust it.'
     nref,rnodes=refusal_count(d['id']) if d.get('id') else (0,[])
     said+=(f" The rules refused {nref} action(s)"+(f" on node(s): {', '.join(rnodes)}" if rnodes else '')+'.') if nref else ' The rules refused no action.'
-    L=['# Run summary','',said,'','## Run info','']+run_info(d)+['','## What you asked','',d.get('task','') or 'No task recorded.','','## What changed','']
+    L=['## Run summary (details)','',said,'','## Run info','']+run_info(d)+['','## What you asked','',d.get('task','') or 'No task recorded.','','## What changed','']
     if nodes:
         for n in nodes:
             f=n.get('files',[]); sh=n.get('shared_files',[]); w=', '.join(n.get('shared_with',[]))
@@ -699,7 +726,7 @@ def build_summary(d):
     if unchecked: todo.append(f"- Nothing is required by the runtime, but these nodes had no passing check, so nothing proves them: {', '.join(unchecked)}. Look at them yourself."+(f" Checked and passed: {', '.join(passed)}." if passed else ''))
     elif status=='complete' and nodes and not todo: todo.append('- Nothing. Every node check ran and passed.')
     L+=todo or ['- Nothing to do.']
-    return '\n'.join(L)+'\n'
+    return summary_top(d,status,said,todo)+'\n'.join(L)+'\n'
 
 def verify_plans(d):
     """Verify steps per node with a target, from a preflight scan. Empty on any scan problem."""
@@ -765,7 +792,7 @@ def render_files(p,d):
     steps=d.get('verify_steps') or {}
     ev=''.join(node_evidence(n,steps.get(n['id'])) for n in d.get('nodes',[]))
     page=f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">{refresh}<title>Graph run {html.escape(d['id'])}</title><style>{CSS}</style></head><body><main>
-<h1>Graph run {html.escape(d['id'])} <small>{html.escape(str(d.get('status','')))}</small></h1><p class="muted">Updated {html.escape(d.get('updated_at',''))}{live}</p>
+<h1 style="font-size:2rem">Graph run {html.escape(d['id'])} <small>{html.escape(str(d.get('status','')))}</small></h1><p class="muted">Updated {html.escape(d.get('updated_at',''))}{live}</p>
 <section class="card">{md_html(build_summary(d))}<p><b>Rule refusals: {refusal_count(d['id'])[0]}</b></p></section>
 <section class="card"><h2>Diagram</h2><svg id="graph" viewBox="0 0 900 300" role="img" aria-label="Execution graph"></svg></section>
 <h2>Evidence per node</h2>{ev or '<p class="muted">No nodes yet.</p>'}
@@ -1147,23 +1174,35 @@ def cmd_defer(a):
     print(f"Deferred: nodes on level {a.from_level} and higher will not start before {budget.local_time(at)} (local time). Levels 1-{a.from_level - 1} can run now.")
     print(f"This is a suggestion only. Nothing is scheduled: run {graph_cmd()} resume at that time to re-read the usage.")
 
+def approval_checks(d, run):
+    """Refuse unless the plan is valid and the size gates are met. Shared by approve and the checkpoint."""
+    if not d.get('nodes'): die(2, f'Refused: run {run} has no nodes. Add the plan, show it to the user, then approve.')
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf): cmd_validate(argparse.Namespace(run=run))
+    except SystemExit:
+        die(3, f'Refused: plan for {run} is not valid. Fix it until "validate {run}" passes, show it again, then approve.\n' + buf.getvalue().rstrip())
+    if budget_missing(d): die(3, f'Refused: the budget step is missing. Run {graph_cmd()} budget --run {run} first, or create the run with init --skip-budget "<reason>".')
+    gaps = outside_gaps(d)
+    if gaps: die(3, f"Refused: each part needs a pick or a \"none found\" note first:\n" + '\n'.join('  - ' + g for g in gaps))
+    if size_of(d) == 'large' and not d.get('checkpoint_built'):
+        die(3, f"Refused: this is a large job. Show the checkpoint first: {graph_cmd()} checkpoint --run {run} --serve (or --terminal). On Claude Code you may use the host's multi-select question with the same list.")
+
+def record_approval(d, run, note, source, drops=(), a=None):
+    d['approval'] = {'at': now(), 'note': note[:500], 'plan': plan_hash(d), 'source': source}
+    if drops: d['approval']['drops'] = list(drops)
+    if not d.get('skip_budget') and d.get('schema_version', 3) >= 5 and size_of(d) != 'small': d['budget'] = fresh_budget(d, a)
+    lines = install_staged(d, run)
+    d['updated_at'] = now(); save(ROOT / run / 'state.json', d)
+    return lines
+
 def cmd_approve(a):
     _, d = load(a.run)
     note = (a.note or '').strip()
     if not note: die(2, 'approve needs --note "<what the user said>". Quote the user. Never approve for them.')
-    if not d.get('nodes'): die(2, f'Refused: run {a.run} has no nodes. Add the plan, show it to the user, then approve.')
-    buf = io.StringIO()
-    try:
-        with contextlib.redirect_stdout(buf): cmd_validate(argparse.Namespace(run=a.run))
-    except SystemExit:
-        die(3, f'Refused: plan for {a.run} is not valid. Fix it until "validate {a.run}" passes, show it again, then approve.\n' + buf.getvalue().rstrip())
-    if budget_missing(d): die(3, f'Refused: the budget step is missing. Run {graph_cmd()} budget --run {a.run} first, or create the run with init --skip-budget "<reason>".')
-    gaps = outside_gaps(d)
-    if gaps: die(3, f"Refused: this is a large job. Each part needs a pick or a \"none found\" note first:\n" + '\n'.join('  - ' + g for g in gaps))
-    d['approval'] = {'at': now(), 'note': note[:500], 'plan': plan_hash(d)}
-    if not d.get('skip_budget') and d.get('schema_version', 3) >= 5: d['budget'] = fresh_budget(d, a)
-    for line in install_staged(d, a.run): print(line)
-    d['updated_at'] = now(); save(ROOT / a.run / 'state.json', d); print('Approval recorded.')
+    approval_checks(d, a.run)
+    for line in record_approval(d, a.run, note, 'model', (), a): print(line)
+    print('Approval recorded.')
     if d.get('budget'): print('\n'.join(tilde(x) for x in budget.lines(d['budget'])))
 
 def cmd_preflight(a):
@@ -1190,12 +1229,14 @@ def check_repo(repo):
     if not outside.valid_repo(repo): die(2, f'Bad repo: {repo!r}. Use owner/repo.')
 
 def outside_gaps(d):
-    """For a large job: parts with neither a pick nor a none-found note. Empty for other sizes."""
-    if d.get('size') != 'large': return []
+    """Parts with neither a pick nor a none-found note. Large: every part. Medium: only the parts marked main. Small: none."""
+    size = size_of(d)
+    if size == 'small': return []
     o, c = O(d), graph_cmd()
-    if not o['parts']: return [f'no parts listed. Run {c} parts --run {d["id"]} --set a,b (the parts of this job, for example design,ui,security)']
+    if size == 'large' and not o['parts']: return [f'no parts listed. Run {c} parts --run {d["id"]} --set a,b (the parts of this job, for example design,ui,security)']
+    need = o['parts'] if size == 'large' else [p for p in o['parts'] if p in o.get('main', [])]
     done = {p['part'] for p in o['picks']} | set(o['none'])
-    return [f'{p}: run {c} find --run {d["id"]} --part {p} --query "<words>" then scan and pick, or {c} part-none --run {d["id"]} --part {p} --note "<why>"' for p in o['parts'] if p not in done]
+    return [f'{p}: run {c} find --run {d["id"]} --part {p} --query "<words>" then scan and pick, or {c} part-none --run {d["id"]} --part {p} --note "<why>"' for p in need if p not in done]
 
 def scan_book(run):
     try: return json.loads((ROOT / run / 'scan.json').read_text(encoding='utf-8'))
@@ -1237,8 +1278,12 @@ def cmd_parts(a):
     names = [x.strip() for x in (a.set or '').split(',') if x.strip()]
     if not names: die(2, 'parts needs --set a,b with at least one part name.')
     for n in names: check_part(n)
-    O(d)['parts'] = list(dict.fromkeys(names)); d['updated_at'] = now(); save(p, d)
-    print('Parts: ' + ', '.join(O(d)['parts']))
+    main = [x.strip() for x in (a.main or '').split(',') if x.strip()]
+    for n in main:
+        check_part(n)
+        if n not in names: die(2, f'--main {n} is not in --set. Main parts must be parts of the job.')
+    O(d)['parts'] = list(dict.fromkeys(names)); O(d)['main'] = list(dict.fromkeys(main)); d['updated_at'] = now(); save(p, d)
+    print('Parts: ' + ', '.join(O(d)['parts']) + (f". Main: {', '.join(O(d)['main'])}" if main else ''))
 
 def cmd_part_none(a):
     p, d = load(a.run); check_part(a.part)
@@ -1326,10 +1371,145 @@ def cmd_vendor_run(a):
     if timed: die(3, f'The command ran longer than {a.timeout} seconds and was stopped.')
     if code != 0: die(1, f'The command exited with {code}.')
 
+# ---- size, features, checkpoint ----
+def cmd_size(a):
+    p, d = load(a.run)
+    old = size_of(d)
+    if a.size == old: print(f'Size is already {old}.'); return
+    d['size'] = a.size; d.setdefault('size_history', []).append({'at': now(), 'from': old, 'to': a.size})
+    d['updated_at'] = now(); save(p, d)
+    print(f'Size changed: {old} -> {a.size}. Gates were re-checked.')
+    gaps = start_gaps(d)
+    gaps = [g for g in gaps if g[0] != 'approve' or not approved(d)]
+    if gaps:
+        print('👉 Do this before any node starts:')
+        for i, (_, t) in enumerate(gaps, 1): print(tilde(f'  {i}. {t}'))
+    else: print('Nothing more is missing.')
+
+def cmd_feature(a):
+    p, d = load(a.run)
+    name = (a.name or '').strip()
+    if not name: die(2, 'feature needs --name "<a few words>".')
+    fs = d.setdefault('features', [])
+    fid = f'f{len(fs) + 1}'
+    fs.append({'id': fid, 'name': checkpoint.clean(name, 60), 'why': checkpoint.clean(a.why or '', 80)})
+    d['updated_at'] = now(); save(p, d)
+    print(f'Feature {fid} added. It shows on the checkpoint.')
+
+def log_refusal(run, msg):
+    with contextlib.suppress(Exception):
+        append_log(run, {'at': now(), 'cmd': 'checkpoint', 'node': None, 'args': {}, 'outcome': 'refused', 'exit_code': 3, 'message': clip(msg)})
+
+def apply_checkpoint(run, dropped, source='checkpoint'):
+    """Record the user's keep/drop answer. Under the run lock. Refuses (exit 3) with a clear message; nothing is saved then."""
+    with run_lock(run):
+        p, d = load(run)
+        items = checkpoint.build_items(d, ROOT / run)
+        valid = {i['id']: i for i in items}
+        dropped = list(dict.fromkeys(dropped))
+        unknown = [x for x in dropped if x not in valid]
+        if unknown: die(3, f"Refused: unknown item(s) {', '.join(checkpoint.clean(x, 40) for x in unknown)}.")
+        drop_nodes = {x[5:] for x in dropped if x.startswith('node:')}
+        for nid in drop_nodes:
+            if (get_node(d, nid) or {}).get('status') != 'pending': die(3, f'Refused: step {nid} already started. Only pending steps can be dropped.')
+        for n in d.get('nodes', []):
+            if n['id'] in drop_nodes: continue
+            bad = [x for x in n.get('depends_on', []) if x in drop_nodes]
+            if bad: die(3, f"Refused: kept step {n['id']} needs dropped step {', '.join(bad)}. Keep {', '.join(bad)}, or drop {n['id']} too.")
+        d['nodes'] = [n for n in d.get('nodes', []) if n['id'] not in drop_nodes]
+        o = O(d)
+        for x in dropped:
+            if x.startswith('pick:'):
+                part = x[5:]
+                o['picks'] = [k for k in o['picks'] if k['part'] != part]; o['none'][part] = 'dropped at the checkpoint'
+            elif x.startswith('feat:'): d['features'] = [f for f in d.get('features', []) if 'feat:' + f['id'] != x]
+        d['checkpoint_built'] = True
+        approval_checks(d, run)
+        names = [valid[x]['title'] for x in dropped]
+        note = 'pressed GO' + (f" (dropped: {', '.join(names)})" if names else ' (kept everything)')
+        lines = record_approval(d, run, note, source, dropped)
+        return d, lines
+
+def serve_checkpoint(run, timeout, open_browser):
+    import http.server, secrets, urllib.parse
+    token = secrets.token_urlsafe(18)
+    state = {'done': False, 'ok': None}
+    class H(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *x): pass
+        def _send(self, code, body, ctype='application/json'):
+            b = body.encode('utf-8') if isinstance(body, str) else body
+            self.send_response(code); self.send_header('Content-Type', ctype + '; charset=utf-8'); self.send_header('Content-Length', str(len(b)))
+            self.send_header('Cache-Control', 'no-store'); self.send_header('Referrer-Policy', 'no-referrer'); self.end_headers(); self.wfile.write(b)
+        def _auth(self):
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            host = (self.headers.get('Host') or '').split(':')[0]
+            ok = secrets.compare_digest((q.get('t') or [''])[0], token) and host in ('127.0.0.1', 'localhost')
+            if not ok:
+                log_refusal(run, 'checkpoint: wrong or missing token'); self._send(403, json.dumps({'error': 'Forbidden'}))
+            return ok
+        def do_GET(self):
+            if not self._auth(): return
+            _, d = load(run)
+            self._send(200, checkpoint.render_html(checkpoint.model(d, ROOT / run), token), 'text/html')
+        def do_POST(self):
+            if not self._auth(): return
+            if urllib.parse.urlsplit(self.path).path != '/go': return self._send(404, '{}')
+            try:
+                n = int(self.headers.get('Content-Length') or 0)
+                if not 0 <= n <= 65536: raise ValueError
+                body = json.loads(self.rfile.read(n) or b'{}'); drops = body.get('dropped', [])
+                if not isinstance(drops, list) or not all(isinstance(x, str) for x in drops): raise ValueError
+            except (ValueError, TypeError):
+                return self._send(400, json.dumps({'error': 'Bad request.'}))
+            try: apply_checkpoint(run, drops)
+            except SystemExit:
+                msg = CTX['msg'] or 'Refused.'; log_refusal(run, msg); return self._send(409, json.dumps({'error': msg}))
+            state['done'] = True; state['ok'] = drops; self._send(200, json.dumps({'ok': True}))
+    srv = http.server.HTTPServer(('127.0.0.1', 0), H); srv.timeout = 0.5
+    url = f'http://127.0.0.1:{srv.server_port}/?t={token}'
+    print(f'Open this page: {url}', flush=True)
+    if open_browser:
+        with contextlib.suppress(Exception):
+            import webbrowser; webbrowser.open(url)
+    end = epoch() + timeout
+    try:
+        while not state['done'] and epoch() < end: srv.handle_request()
+    finally: srv.server_close()
+    return state['ok']
+
+def cmd_checkpoint(a):
+    p, d = load(a.run)
+    if not d.get('nodes'): die(2, f'Run {a.run} has no nodes. Add the plan first.')
+    with run_lock(a.run):
+        _, d = load(a.run); d['checkpoint_built'] = True; d['updated_at'] = now(); save(p, d)
+    m = checkpoint.model(d, ROOT / a.run)
+    if a.serve and a.terminal: die(2, 'Use --serve or --terminal, not both.')
+    if a.terminal:
+        print(tilde(checkpoint.render_terminal(m)), flush=True)
+        ids = [i['id'] for i in m['items']]
+        while True:
+            line = sys.stdin.readline()
+            if not line: die(1, 'No answer. Nothing was approved.')
+            try: nums = checkpoint.parse_terminal(line, len(ids)); break
+            except ValueError as e: print(str(e), flush=True)
+        _, lines = apply_checkpoint(a.run, [ids[n - 1] for n in sorted(nums)])
+    elif a.serve:
+        drops = serve_checkpoint(a.run, a.timeout, not a.no_open)
+        if drops is None: die(1, 'The checkpoint timed out. Nothing was approved.')
+        lines = []
+    else:
+        page = ROOT / a.run / 'checkpoint.html'
+        page.write_text(checkpoint.render_html(m), encoding='utf-8')
+        print(tilde(checkpoint.render_terminal(m, color=False)))
+        print(f'👉 Do this: show the user this list, or run {graph_cmd()} checkpoint --run {a.run} --serve  (page: {tilde(str(page))})')
+        return
+    for l in lines: print(tilde(l))
+    print('✔ Approved. Pressed GO at the checkpoint.')
+
 # ---- run log: .graph/runs/<id>/log.jsonl, append-only, one JSON line per command call ----
 LOG_ARGS = ('project_dir', 'text', 'note', 'why', 'skills', 'plugins', 'clis', 'mcp', 'task_text', 'auto_approve', 'skip_context', 'skip_preflight', 'goal', 'no_check', 'status', 'depends_on', 'check', 'target', 'risk', 'reason', 'command', 'type', 'needs', 'refresh',
             'with_accounts', 'include_dependents', 'skip_budget', 'left_pct', 'resets', 'from_level', 'not_before', 'host', 'session', 'needs', 'effort', 'model',
-            'part', 'query', 'url', 'mentions', 'pick', 'use', 'kind', 'ok', 'set', 'argv', 'where', 'size')
+            'part', 'query', 'url', 'mentions', 'pick', 'use', 'kind', 'ok', 'set', 'argv', 'where', 'size', 'main', 'name', 'serve', 'terminal', 'no_open')
 
 def log_path(run_id): return ROOT / run_id / 'log.jsonl'
 
@@ -1400,7 +1580,7 @@ def cmd_log(a):
 
 def main():
     ap=argparse.ArgumentParser();sp=ap.add_subparsers(required=True)
-    x=sp.add_parser('init');x.add_argument('task');x.add_argument('--id');x.add_argument('--host');x.add_argument('--max-retries',type=int,default=2);x.add_argument('--quality-command',action='append');x.add_argument('--skip-preflight',metavar='REASON');x.add_argument('--skip-context',metavar='REASON');x.add_argument('--auto-approve',metavar='WORDS');x.add_argument('--skip-budget',metavar='REASON');x.add_argument('--size',choices=['small','large'],default='small');x.set_defaults(fn=cmd_init)
+    x=sp.add_parser('init');x.add_argument('task');x.add_argument('--id');x.add_argument('--host');x.add_argument('--max-retries',type=int,default=2);x.add_argument('--quality-command',action='append');x.add_argument('--skip-preflight',metavar='REASON');x.add_argument('--skip-context',metavar='REASON');x.add_argument('--auto-approve',metavar='WORDS');x.add_argument('--skip-budget',metavar='REASON');x.add_argument('--size',choices=list(SIZES),required=True);x.set_defaults(fn=cmd_init)
     x=sp.add_parser('node');x.add_argument('run');x.add_argument('node');x.add_argument('--role',required=True);x.add_argument('--status',required=True);x.add_argument('--depends-on',nargs='*');x.add_argument('--model');x.add_argument('--needs');x.add_argument('--effort');x.add_argument('--files',nargs='*');x.add_argument('--check');x.add_argument('--no-check',dest='no_check',metavar='REASON');x.add_argument('--target');x.add_argument('--risk');x.add_argument('--goal');x.add_argument('--reason');x.add_argument('--check-timeout',type=int,default=300);x.set_defaults(fn=cmd_node,nolock=True)
     x=sp.add_parser('brief');x.add_argument('run');x.add_argument('node');x.set_defaults(fn=cmd_brief,nolock=True)
     x=sp.add_parser('verify-plan');x.add_argument('run');x.add_argument('node');x.set_defaults(fn=cmd_verify_plan,nolock=True)
@@ -1429,12 +1609,15 @@ def main():
     x=sp.add_parser('defer');x.add_argument('run');x.add_argument('--from-level',type=int,required=True);x.add_argument('--not-before',required=True);x.set_defaults(fn=cmd_defer)
     x=sp.add_parser('approve');x.add_argument('--run',required=True);x.add_argument('--note');x.set_defaults(fn=cmd_approve)
     x=sp.add_parser('preflight');x.add_argument('--run');x.add_argument('--needs');x.add_argument('--refresh',action='store_true');x.add_argument('--with-accounts',action='store_true');x.add_argument('--json',action='store_true');x.set_defaults(fn=cmd_preflight,nolock=True)
-    x=sp.add_parser('parts');x.add_argument('--run',required=True);x.add_argument('--set');x.set_defaults(fn=cmd_parts)
+    x=sp.add_parser('parts');x.add_argument('--run',required=True);x.add_argument('--set');x.add_argument('--main');x.set_defaults(fn=cmd_parts)
     x=sp.add_parser('part-none');x.add_argument('--run',required=True);x.add_argument('--part',required=True);x.add_argument('--note');x.set_defaults(fn=cmd_part_none)
     x=sp.add_parser('find');x.add_argument('--run',required=True);x.add_argument('--part',required=True);x.add_argument('--query');x.set_defaults(fn=cmd_find,nolock=True)
     x=sp.add_parser('candidate');x.add_argument('--run',required=True);x.add_argument('--part',required=True);x.add_argument('--url',required=True);x.add_argument('--mentions',type=int,default=1);x.add_argument('--note');x.set_defaults(fn=cmd_candidate,nolock=True)
     x=sp.add_parser('scan');x.add_argument('--run',required=True);x.add_argument('--part',required=True);x.add_argument('--pick',required=True);x.set_defaults(fn=cmd_scan,nolock=True)
     x=sp.add_parser('pick');x.add_argument('--run',required=True);x.add_argument('--part',required=True);x.add_argument('--use',required=True);x.add_argument('--as',dest='kind',choices=['skill','reference','tool'],default='reference');x.add_argument('--ok');x.set_defaults(fn=cmd_pick)
+    x=sp.add_parser('size');x.add_argument('--run',required=True);x.add_argument('--to',dest='size',choices=list(SIZES),required=True);x.set_defaults(fn=cmd_size)
+    x=sp.add_parser('feature');x.add_argument('--run',required=True);x.add_argument('--name',required=True);x.add_argument('--why');x.set_defaults(fn=cmd_feature)
+    x=sp.add_parser('checkpoint');x.add_argument('--run',required=True);x.add_argument('--serve',action='store_true');x.add_argument('--terminal',action='store_true');x.add_argument('--no-open',dest='no_open',action='store_true');x.add_argument('--timeout',type=int,default=1800);x.set_defaults(fn=cmd_checkpoint,nolock=True)
     x=sp.add_parser('keep');x.add_argument('--run',required=True);x.add_argument('--pick',required=True);x.set_defaults(fn=cmd_keep)
     x=sp.add_parser('vendor-run');x.add_argument('--run',required=True);x.add_argument('--pick',required=True);x.add_argument('--in',dest='where',choices=['vendor','project'],default='vendor');x.add_argument('--timeout',type=int,default=300);x.add_argument('cmd',nargs=argparse.REMAINDER);x.set_defaults(fn=cmd_vendor_run,nolock=True)
     a=ap.parse_args()

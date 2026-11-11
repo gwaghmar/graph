@@ -76,7 +76,7 @@ In normal use the agent runs these for you. Type `/graph <task>` on Claude Code,
 |---|---|
 | `preflight --needs a,b [--refresh] [--with-accounts] [--json] [--run id]` | Scan the environment, pick tools (`--run` logs it; nodes cannot start until it is logged) |
 | `log <run> [--refusals] [--node X] [--json]` | Show what the run did and what the rules refused |
-| `init "<task>" [--host H] [--max-retries N] [--skip-preflight R] [--skip-context R] [--skip-budget R] [--auto-approve WORDS]` | Start a run |
+| `init "<task>" --size small|medium|large [--host H] [--max-retries N] [--skip-preflight R] [--skip-context R] [--skip-budget R] [--auto-approve WORDS]` | Start a run |
 | `context --run id` | Read the user: dated list of global, project and memory files, stale notes flagged |
 | `profile --run id --text "..."` | Record how this user works (10 lines max) |
 | `tools --run id --task "..."` | Rank skills and plugins for the task, show CLI and MCP picks |
@@ -89,7 +89,9 @@ In normal use the agent runs these for you. Type `/graph <task>` on Claude Code,
 | `pick --run id --part P --use owner/repo [--as skill\|reference\|tool] [--ok "..."]` | Use a scanned find. Refuses unscanned or blocked. A skill installs in this project only, after approve |
 | `keep --run id --pick owner/repo` | Keep a pick at finish. The rest is removed |
 | `vendor-run --run id --pick owner/repo [--in vendor\|project] -- cmd...` | Run a picked tool, no shell, PATH and LANG and a temporary HOME only. Not a full sandbox |
-| `parts --run id --set a,b`, `part-none --run id --part P --note "..."` | Name the parts of a large job and log "none found". `init --size large` blocks approve until each part has a pick or a note |
+| `parts --run id --set a,b [--main a]`, `part-none --run id --part P --note "..."` | Name the parts of a job and log "none found". Large: every part needs a pick or a note before approve. Medium: only `--main` parts |
+| `checkpoint --run id [--serve] [--terminal] [--no-open]` | One short keep/drop screen, then GO. `--serve` is a local page with a one-time token. `--terminal` reads `go` or `drop 2,4`. Large jobs must show it before approve |
+| `size --run id --to small|medium|large`, `feature --run id --name "..."` | Change the size (logged, gates re-checked). Add a researched feature to the checkpoint |
 | `approve --run id --note "..."` | Record the user's go-ahead, in their words |
 | `node <run> <id> --role R --status S [...]` | Add or update a node, with rule checks |
 | `validate <run>` | Reject bad dependencies |
@@ -111,7 +113,7 @@ In normal use the agent runs these for you. Type `/graph <task>` on Claude Code,
 
 Before any node runs, the agent follows this order:
 
-1. Size the task. Trivial tasks skip the graph. Otherwise `init` creates the run.
+1. Size the task. Trivial tasks skip the graph. Otherwise `init --size small|medium|large` creates the run. Small needs only preflight and approve.
 2. Read the user. `context` lists the global, project and memory files with their age and flags notes older than 30 days as STALE. `profile` records how this user works.
 3. Pick tools. `preflight` scans the machine. `tools` ranks the installed skills and plugins for the task by word overlap (plain code, no AI) and notes strong matches that are turned off. `choose` records the toolkit. Unknown names are allowed and flagged.
 4. Work with the user. The agent shares options and asks for the user's own ideas before planning.

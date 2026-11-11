@@ -11,6 +11,7 @@ class GraphCase(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
 
     def g(self, *args, code=0):
+        if args and args[0] == 'init' and '--size' not in args: args = (*args, '--size', 'medium')
         r = subprocess.run([sys.executable, GRAPH, *args], cwd=self.dir, capture_output=True,
                            text=True, encoding='utf-8')
         self.assertEqual(r.returncode, code, f'{args}: {r.stdout}{r.stderr}')
@@ -590,7 +591,7 @@ class Fixes(GraphCase):
         skill = Path(self.dir) / '.claude/skills/graph'
         shutil.copytree(Path(GRAPH).parent.parent, skill, ignore=shutil.ignore_patterns('__pycache__'))
         run = lambda *a: subprocess.run([sys.executable, str(skill / 'scripts/graph.py'), *a], cwd=self.dir, capture_output=True, text=True)
-        self.assertEqual(run('init', 't', '--id', 'r1', '--skip-preflight', 'x', '--skip-context', 'x', '--skip-budget', 'x', '--auto-approve', 'just do it').returncode, 0)
+        self.assertEqual(run('init', 't', '--id', 'r1', '--skip-preflight', 'x', '--skip-context', 'x', '--skip-budget', 'x', '--auto-approve', 'just do it', '--size', 'medium').returncode, 0)
         self.assertEqual(run('node', 'r1', 'a', '--role', 'research', '--status', 'pending', '--goal', 'g').returncode, 0)
         self.assertEqual(run('export-workflow', 'r1').returncode, 0)
         js = (Path(self.dir) / '.claude/workflows/graph-r1.js').read_text(encoding='utf-8')
@@ -629,7 +630,7 @@ class Fixes(GraphCase):
 class SecondRound(GraphCase):
     def raw_init(self, *args, code=0, env=None):
         import os
-        r = subprocess.run([sys.executable, GRAPH, 'init', *args], cwd=self.dir, capture_output=True, text=True,
+        r = subprocess.run([sys.executable, GRAPH, 'init', *args, '--size', 'medium'], cwd=self.dir, capture_output=True, text=True,
                            encoding='utf-8', env=env or os.environ)
         self.assertEqual(r.returncode, code, f'{args}: {r.stdout}{r.stderr}')
         return r
@@ -716,7 +717,7 @@ class SecondRound(GraphCase):
         def run(*a, code=0):
             r = subprocess.run([sys.executable, GRAPH, *a], cwd=self.dir, capture_output=True, text=True, encoding='utf-8', env=env)
             self.assertEqual(r.returncode, code, r.stdout + r.stderr); return r
-        run('init', 't', '--id', 'r1', '--skip-preflight', 'x')
+        run('init', 't', '--id', 'r1', '--skip-preflight', 'x', '--size', 'medium')
         run('context', '--run', 'r1')
         run('profile', '--run', 'r1', '--text', 'likes tables [user said]', code=2)
         run('profile', '--run', 'r1', '--text', 'No user rules found [none]')

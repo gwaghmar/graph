@@ -155,7 +155,7 @@ class PreflightCase(unittest.TestCase):
         self.assertNotIn('no mapping', r.stdout)
 
     def test_unknown_need_logged(self):
-        subprocess.run([sys.executable, str(CORE / 'graph.py'), 'init', 't', '--id', 'r1', '--skip-context', 'x'],
+        subprocess.run([sys.executable, str(CORE / 'graph.py'), 'init', 't', '--id', 'r1', '--skip-context', 'x', '--size', 'medium'],
                        cwd=self.cwd, capture_output=True, text=True)
         self.cli('--run', 'r1', '--needs', 'python')
         log = (self.cwd / '.graph/runs/r1/log.jsonl').read_text(encoding='utf-8')

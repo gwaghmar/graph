@@ -4,6 +4,11 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added (human checkpoint, sizes, short loud output)
+- `checkpoint --run <id> [--serve] [--terminal]`: one short keep/drop screen (plan steps, top pick per part with "+2 more", safety badge, researched features, cost, security) and one GO. `--serve` uses a local page with a one-time token (403 on a wrong one, 30 minute timeout); `--terminal` reads `go` or `drop 2,4` and honours `NO_COLOR`. GO records approval as "pressed GO" with the drops, removes dropped pending steps and picks, and refuses if a kept step needs a dropped one.
+- `init --size small|medium|large` (required). Small needs only preflight and approve. Medium keeps the current gates and gates only `parts --main` parts. Large gates every part and the checkpoint. `size --to` changes it (logged, gates re-checked). `feature` adds a researched feature to the checkpoint.
+- The summary starts with a big status line and at most 3 "Do this" items, then a divider and the details. It says whether approval was "pressed GO" or "recorded by the model". Refusals print a heading, a "Do this" list and show home as `~`.
+
 ### Added (outside skills and repos)
 - `find`, `candidate`, `scan`, `pick`, `keep`, `vendor-run`, `parts` and `part-none`: look for skills and repos people already made (Reddit, Hacker News, GitHub, plus X and web finds from the model), apply a trust bar (200 stars or 3 mentions, and updated in 90 days), show the top 3 with one recommended, scan the pick without running it, install it in the project only and remove it at `finish` unless kept.
 - `init --size large`: `approve` is refused until each part has a pick or a "none found" note.

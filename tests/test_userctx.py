@@ -35,6 +35,7 @@ class Base(unittest.TestCase):
         return e
 
     def g(self, *args, code=0):
+        if args and args[0] == 'init' and '--size' not in args: args = (*args, '--size', 'medium')
         r = subprocess.run([sys.executable, GRAPH, *args], cwd=self.proj, capture_output=True, text=True,
                            encoding='utf-8', env=self.env())
         self.assertEqual(r.returncode, code, f'{args}: {r.stdout}{r.stderr}')
@@ -298,7 +299,7 @@ class GateTests(Base):
         shutil.copytree(CORE.parent, dest, ignore=shutil.ignore_patterns('__pycache__'))
         run = lambda *a: subprocess.run([sys.executable, str(dest / 'scripts/graph.py'), *a], cwd=self.proj,
                                         capture_output=True, text=True, encoding='utf-8', env=self.env())
-        self.assertEqual(run('init', 't', '--id', 'r1').returncode, 0)
+        self.assertEqual(run('init', 't', '--id', 'r1', '--size', 'medium').returncode, 0)
         run('node', 'r1', 'a', '--role', 'research', '--status', 'pending', '--goal', 'g')
         r = run('node', 'r1', 'a', '--role', 'research', '--status', 'running')
         self.assertEqual(r.returncode, 3)

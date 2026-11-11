@@ -114,4 +114,14 @@ Compare: `budget-calib.jsonl` holds one line per host, window and run: percent b
 - `pick`: refused when the repo is not a shown find for the part, not scanned, blocked, or its copy is gone. After approval a warn needs `--ok "<the user's words>"`. A skill picked before approval is staged and copied by `approve`, into `.claude/skills/<name>` and `.agents/skills/<name>` with `.graph-outside-owner`. A folder without our marker is never overwritten.
 - `finish` removes folders that carry this run's marker and `.graph/vendor` and `.graph/tmp`, except `keep` picks. The summary lists removed and kept items.
 - `vendor-run`: refused before approval and for anything not picked as a tool. No shell. Env is PATH, LANG, HOME, USERPROFILE, XDG dirs and temp dirs under `.graph/tmp`, plus SYSTEMROOT, COMSPEC and PATHEXT on Windows. It is not a sandbox.
-- Large job gate: `init --size large` and `parts`. `approve` is refused until each part has a pick or a `part-none` note.
+- Size gates: `init --size` is required. Small: `start_gaps` needs only preflight and approve; budget, profile and choose are not required. Medium: all current gates, and `outside_gaps` covers only parts listed with `parts --main`. Large: every part needs a pick or a `part-none` note, and `checkpoint_built` must be set (any `checkpoint` call sets it) before `approve`. `size --to` changes the size, logs it (`size_history` in state) and prints the gates now missing.
+
+## Checkpoint
+`checkpoint.py` builds items from state: one per node (`node:<id>`), one per part with a pick or a recommended find (`pick:<part>`, with safety badge and "+N more"), one per feature (`feat:<id>`). It adds a cost line (`usage.totals.cost` if present, else "$0 / unknown") and a security line from `scan.json`. The page is one inline file with no network loads.
+- `--serve`: `http.server` on 127.0.0.1, random port, one-time token (`?t=`) checked on every request, plus a Host check. Wrong token is 403 and logged. `POST /go` with `{"dropped": [ids]}` calls `apply_checkpoint` under the run lock. A refusal answers 409 and the server stays up. After a good GO the server stops. Timeout 30 minutes (exit 1, nothing approved).
+- `--terminal`: ANSI color only on a TTY with `NO_COLOR` unset. Input `go` or `drop 2,4`; end of input approves nothing.
+- `apply_checkpoint` refuses (exit 3, nothing saved) for unknown ids, a drop of a node that is not pending, a kept node that depends on a dropped node, or when the plan or gates fail after the drops. Dropped picks are removed and the part is logged as none. It records `approval` with `source: "checkpoint"` and `drops`. `approve --note` records `source: "model"`. The summary shows which.
+- Every call, 403 and 409 is in `log.jsonl` under `checkpoint`.
+
+## Output style
+Summary top: big status line, `## 👉 Do this:` with at most 3 items, a divider, then the details. Refusals print `✖ STOPPED` and the message; gap lists start with `👉 Do this:`. Home is shown as `~`.

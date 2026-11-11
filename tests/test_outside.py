@@ -84,6 +84,7 @@ class Base(unittest.TestCase):
         return root
 
     def cli(self, *args, code=0):
+        if args and args[0] == 'init' and '--size' not in args: args = (*args, '--size', 'medium')
         graph.CTX.update(msg=None, checks=[], run=None, preflight=None, route=None)
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.object(sys, 'argv', ['graph.py', *args]), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -434,6 +435,9 @@ class Flow(Base):
         self.assertNotIn('design:', out); self.assertIn('security:', out)
         self.find_scan(part='security')
         self.cli('pick', '--run', 'r1', '--part', 'security', '--use', 'acme/design-skill', '--as', 'reference')
+        out = self.cli('approve', '--run', 'r1', '--note', 'go', code=3)
+        self.assertIn('checkpoint', out)
+        self.cli('checkpoint', '--run', 'r1')
         self.cli('approve', '--run', 'r1', '--note', 'go')
 
     def test_small_job_has_no_gate(self):
