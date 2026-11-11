@@ -4,7 +4,7 @@
 This module only builds and shows items. It never changes run state. graph.py applies the answer.
 Everything shown is plain text from the run state. Fetched text is cleaned first. No network loads in the page."""
 from __future__ import annotations
-import html, json, os, re, socket, sys, time
+import base64, html, json, os, re, socket, sys, time
 from pathlib import Path
 
 import outside
@@ -64,6 +64,10 @@ def build_items(d, run_dir):
                       'why': ' · '.join(b for b in bits if b) or ('picked' if pk else 'top find'), 'badge': badge, 'more': max(len(top) - 1, 0), 'locked': False})
     for f in d.get('features', []):
         items.append({'id': 'feat:' + f['id'], 'kind': 'feature', 'part': 'Feature people want', 'title': clean(f.get('name')), 'why': clean(f.get('why'), 70), 'badge': None, 'more': 0, 'locked': False})
+    if d.get('campaign'):
+        import growth
+        try: items += growth.checkpoint_cards(d['campaign'])
+        except growth.Refuse: pass
     return items
 
 def cost_line(d):
@@ -100,6 +104,7 @@ def render_terminal(m, color=None, dropped=()):
         if it['more']: extra += f"  +{it['more']} more"
         L.append(f"{paint(str(i) + '.', '1', on)} {tag}  {paint(it['part'].upper(), '36', on)}  {paint(it['title'], '1', on)}{extra}")
         if it['why']: L.append(f"        {it['why']}")
+        if it.get('thumb'): L.append(f"        thumbnail: {it['thumb']}")
     L += ['', f"Cost: {m['cost']}", f"Security: {m['security']}"]
     if m['hidden']: L.append(f"hidden: {m['hidden']} below bar")
     L += ['', paint('Type  go   or   drop 2,4   (drops those, then goes)', '1;36', on)]
@@ -133,7 +138,7 @@ h1{font:700 34px/1.1 var(--display);margin:0}.ex{font:600 12px var(--body);lette
 .card.off{border-color:var(--drop);background:var(--drop-soft)}.card.off .tog{background:var(--drop)}.card.off .pick{text-decoration:line-through;opacity:.6}
 .card.lock{cursor:default;opacity:.8}.card.lock .tog{background:var(--muted)}
 .badge{display:inline-block;font:700 12px var(--body);padding:2px 8px;border-radius:99px;margin-right:6px;background:var(--keep-soft);color:var(--keep)}.badge.warn{background:var(--warn-soft);color:var(--warn)}.badge.bad{background:var(--drop-soft);color:var(--drop)}
-.more{font-size:14px;color:var(--accent)}
+.more{font-size:14px;color:var(--accent)}.thumb{grid-column:1/3;max-width:100%;border-radius:10px;margin-top:6px}
 .money,.sec{background:var(--paper);border-radius:14px;padding:14px 16px;border:3px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:10px}.money b{font:700 30px var(--display)}.sec{font-size:15px}
 .go{font:700 26px var(--display);padding:18px;border:0;border-radius:14px;background:var(--fg);color:var(--bg);cursor:pointer}.go[disabled]{opacity:.5;cursor:default}
 .msg{font:700 20px var(--display);text-align:center}.msg.ok{color:var(--keep)}.msg.bad{color:var(--drop)}
@@ -153,6 +158,16 @@ if(r.ok){msg.className='msg ok';msg.textContent='\\u2713 Approved. Building now.
 catch(e){msg.className='msg bad';msg.textContent='Could not reach the runtime.';go.disabled=false}
 msg.hidden=false});"""
 
+def thumb_html(it):
+    """A small thumbnail for a video card, inlined so the page needs no file server. Only png, jpg or gif under 400 KB."""
+    p = it.get('thumb')
+    try:
+        f = Path(p) if p else None
+        if not f or not f.is_file() or f.stat().st_size > 400_000 or f.suffix.lower() not in ('.png', '.jpg', '.jpeg', '.gif'): return ''
+        mime = 'image/png' if f.suffix.lower() == '.png' else 'image/gif' if f.suffix.lower() == '.gif' else 'image/jpeg'
+        return f'<img class="thumb" alt="video thumbnail" src="data:{mime};base64,{base64.b64encode(f.read_bytes()).decode()}">'
+    except OSError: return ''
+
 def render_html(m, token=None):
     e = html.escape
     cards = []
@@ -164,7 +179,7 @@ def render_html(m, token=None):
         dis = ' aria-disabled="true"' if lock else ''
         cards.append(f'<div class="card{" lock" if lock else ""}" data-id="{e(it["id"])}" tabindex="{-1 if lock else 0}" role="switch" aria-checked="true"{dis}>'
                      f'<span class="part">{e(it["part"])}</span><span class="tog">{"LOCKED" if lock else "KEEP"}</span>'
-                     f'<span class="pick">{e(it["title"])}</span><span class="why">{b}{e(it["why"])}{more}</span></div>')
+                     f'<span class="pick">{e(it["title"])}</span><span class="why">{b}{e(it["why"])}{more}</span>{thumb_html(it)}</div>')
     hid = f'<p class="ex">hidden: {m["hidden"]} below bar</p>' if m['hidden'] else ''
     js = JS.replace('%TOKEN%', json.dumps(token).replace('<', '\\u003c'))
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>Graph checkpoint</title><style>{CSS}</style></head><body><main class="wrap">

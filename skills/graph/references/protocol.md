@@ -133,3 +133,29 @@ Summary top: big status line, `## 👉 Do this:` with at most 3 items, a divider
 - `scan`: a full shallow clone first. Over `CLONE_MAX` (size excludes `.git`) it retries as `git clone --depth 1 --filter=blob:none --sparse`, lists `SKILL.md` folders with `git ls-tree`, runs `git sparse-checkout set --cone <dirs>` and scans only those. `--path <folder>` skips the full clone. If nothing fits or no skill folder exists the result is `verdict: big` ("too big: reference only"): only `pick --as reference` is allowed, nothing is copied.
 - Scanner levels: license files (LICENSE, COPYING, NOTICE) ignore URLs; markdown links in plain docs are not network use. The strict findings (injection phrase, hidden comment, hidden characters, secret place plus network) are BLOCK in agent files (`SKILL.md`, `AGENTS.md`, `CLAUDE.md`, `*.mdc`, files under `prompts/`, `commands/`, `agents/`) and BLOCK or WARN by their own rule in code; in other docs they are WARN.
 - Usage ledger (Claude Code): every `*.jsonl` in the project folder and its `*/subagents/agent-*.jsonl`, plus folders for sub folders or worktrees whose lines have a `cwd` inside the project, in the run window, de-duplicated by message id. `usage.sessions` is the session count.
+
+## Growth mode
+
+`grow` is in `scripts/growth.py`. Every `grow` command and refusal is one line in `.graph/campaigns/<id>/log.jsonl`. Exit 2 is bad input. Exit 3 is a refused rule. Files: `campaign.json`, `queue.jsonl` (latest line per id wins), `metrics.jsonl`, `log.jsonl`, `drafts/`, `inbox/`.
+
+Commands: `grow init`, `channel add`, `source add`, `read`, `exp add|baseline|start|decide`, `queue add|show|approve|drop`, `post`, `video-check`, `video-done`, `tick`, `brief`, `report`. `--campaign <id>` is needed only when there is more than one campaign.
+
+Experiment: `{id, hypothesis, surface, change{kind, ref, revert_ref}, metric, baseline{value, source, method, as_of}, window{start, end, min_sample}, state, decision{decision, reading, reason, at}}`. States: proposed, baselined, live, measuring, decided. Refused (exit 3, logged):
+- two changes in one experiment;
+- live with no baseline, or a baseline dated after the change, or an unknown or stale baseline;
+- a second live experiment on the same metric and surface;
+- a decision before the window end, on a stale or unknown reading, or on a reading from before the change;
+- keep or revert below `min_sample` (the reading's `--sample`): only inconclusive;
+- revert with no `revert_ref` or no `--undo`. For posts, revert means stop the pattern.
+
+A reading needs source, method and a date (`as_of`). Stale is older than the source lag (`--lag-days`, default 3). Ladder for metrics: public (`github:<owner>/<repo>` stars, or `json:<https url>#field`), the user's CLI or MCP found by `preflight` (the model records the number), a CSV in `inbox/` (columns `metric,date,value[,sample]`), the user typing it. A failed read is `null`, shown as unknown.
+
+Queue item: `{id, experiment, channel, handle, kind post|reply|video|listing_edit, draft_path, sha256, preview, disclosure, rung, why_not_higher, state, expires_at, approved{at, words|pressed-go, hash}, result{url|screenshot, at}}`. States: drafted, shown, approved or dropped or expired, posted or failed. `sha256` covers the draft, and for a video also the media file. Approval stores that hash. `post` recomputes it: a change voids the approval and returns the item to drafted. `queue approve` needs the item shown, the hash, and the user's own words (not the draft text). `--auto-approve` is always refused. The checkpoint screen shows one card per open item (max 5 per cycle); GO approves the kept cards, bound to the hash on the card.
+
+`post` checks: approved and not expired, hash, own handle in the channel config, reply thread listed in the draft (`thread: <url>` lines), disclosure text present when the channel needs it, no duplicate text, the per-channel daily cap and minimum gap, a `--result` url or an existing screenshot path. Rung 4 also needs `--before-shot` and an after screenshot as `--result`. The runtime records the rung and the reason. It does not post.
+
+`tick` order: load, budget gate (refuses under 10% left; unknown budget goes on), read metrics, decide ended experiments (only closes with "inconclusive" when the data is too small; otherwise it lists the experiment for the model), expire queue, open the cycle run (`<campaign>-c<N>`, reused while still open), draft, stop at the checkpoint. The order is in the log line.
+
+`video-check <file> [--thumb png]`: the file exists and `ffprobe` shows a duration above 0; without `ffprobe`, size above 0. `ffmpeg` writes the thumbnail when present. Use it as the check of the render node.
+
+`report` shows every number with source and date, the same-weekday comparison and the prior trend, "moved with" for experiments, "not enough data to decide" where it applies, and the unknowns by name.

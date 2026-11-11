@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from preflight import run_proc
-import userctx, usage, routing, budget, outside, checkpoint
+import userctx, usage, routing, budget, outside, checkpoint, growth
 
 ROOT = Path('.graph/runs')
 STATUSES = ('pending', 'running', 'retrying', 'complete', 'failed', 'skipped', 'cached')
@@ -1466,6 +1466,10 @@ def apply_checkpoint(run, dropped, source='checkpoint', evidence=None):
             elif x.startswith('feat:'): d['features'] = [f for f in d.get('features', []) if 'feat:' + f['id'] != x]
         d['checkpoint_built'] = True
         approval_checks(d, run)
+        qcards = [x for x in valid if x.startswith('queue:')]
+        if qcards:
+            try: growth.checkpoint_apply(d.get('campaign'), [x for x in qcards if x not in dropped], [x for x in qcards if x in dropped])
+            except growth.Refuse as e: die(3, e.text())
         names = [valid[x]['title'] for x in dropped]
         note = 'pressed GO' + (f" (dropped: {', '.join(names)})" if names else ' (kept everything)')
         lines = record_approval(d, run, note, source, dropped, evidence=evidence)
@@ -1640,6 +1644,31 @@ def cmd_checkpoint(a):
     for l in lines: print(tilde(l))
     print('✔ Approved. Pressed GO at the checkpoint.')
 
+# ---- growth mode: the `grow` command lives in growth.py ----
+def grow_budget():
+    h = budget_host({'host': None, 'host_detected': None})
+    if h == 'unknown':
+        import preflight
+        h = usage.host_key(preflight.safe(lambda: preflight.detect_host(os.environ, Path.cwd(), Path.home()), 'unknown'))
+    res = budget.usage_left(h, Path.home(), epoch())
+    if res.get('status') != 'ok' or not res.get('windows'): return {'status': 'unknown'}
+    return {'status': 'ok', 'left_pct': min(100 - w['used_pct'] for w in res['windows'])}
+
+def grow_open_run(task, rid, cid):
+    with contextlib.redirect_stdout(io.StringIO()):
+        cmd_init(argparse.Namespace(task=task, id=rid, host=None, max_retries=2, quality_command=None, skip_preflight=None, skip_context=None, auto_approve=None, skip_budget=None, size='medium'))
+    p, d = load(rid); d['campaign'] = cid; save(p, d)
+
+def grow_run_status(rid):
+    try: return json.loads((ROOT / rid / 'state.json').read_text(encoding='utf-8')).get('status')
+    except (OSError, ValueError): return None
+
+def cmd_grow(a):
+    import preflight
+    hooks = {'budget': grow_budget, 'open_run': grow_open_run, 'run_status': grow_run_status,
+             'host': preflight.safe(lambda: preflight.detect_host(os.environ, Path.cwd(), Path.home()), 'unknown')}
+    growth.dispatch(a.rest, hooks, die)
+
 # ---- run log: .graph/runs/<id>/log.jsonl, append-only, one JSON line per command call ----
 LOG_ARGS = ('project_dir', 'text', 'note', 'why', 'skills', 'plugins', 'clis', 'mcp', 'task_text', 'auto_approve', 'skip_context', 'skip_preflight', 'goal', 'no_check', 'status', 'depends_on', 'check', 'target', 'risk', 'reason', 'command', 'type', 'needs', 'refresh',
             'with_accounts', 'include_dependents', 'skip_budget', 'left_pct', 'resets', 'from_level', 'not_before', 'host', 'session', 'needs', 'effort', 'model',
@@ -1752,6 +1781,7 @@ def main():
     x=sp.add_parser('size');x.add_argument('--run',required=True);x.add_argument('--to',dest='size',choices=list(SIZES),required=True);x.set_defaults(fn=cmd_size)
     x=sp.add_parser('feature');x.add_argument('--run',required=True);x.add_argument('--name',required=True);x.add_argument('--why');x.set_defaults(fn=cmd_feature)
     x=sp.add_parser('checkpoint');x.add_argument('--run',required=True);x.add_argument('--serve',action='store_true');x.add_argument('--terminal',action='store_true');x.add_argument('--no-open',dest='no_open',action='store_true');x.add_argument('--open',action='store_true');x.add_argument('--background',action='store_true');x.add_argument('--wait',action='store_true');x.add_argument('--stop',action='store_true');x.add_argument('--serve-child',dest='serve_child',action='store_true',help=argparse.SUPPRESS);x.add_argument('--timeout',type=int,default=None);x.set_defaults(fn=cmd_checkpoint,nolock=True)
+    x=sp.add_parser('grow');x.add_argument('rest',nargs=argparse.REMAINDER);x.set_defaults(fn=cmd_grow,nolock=True)
     x=sp.add_parser('keep');x.add_argument('--run',required=True);x.add_argument('--pick',required=True);x.set_defaults(fn=cmd_keep)
     x=sp.add_parser('vendor-run');x.add_argument('--run',required=True);x.add_argument('--pick',required=True);x.add_argument('--in',dest='where',choices=['vendor','project'],default='vendor');x.add_argument('--timeout',type=int,default=300);x.add_argument('--no-sandbox',dest='no_sandbox',action='store_true');x.add_argument('cmd',nargs=argparse.REMAINDER);x.set_defaults(fn=cmd_vendor_run,nolock=True)
     a=ap.parse_args()

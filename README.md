@@ -108,6 +108,7 @@ In normal use the agent runs these for you. Type `/graph <task>` on Claude Code,
 | `finish <run> --status complete\|failed` | Close the run |
 | `resume` | Continue the latest open run |
 | `status`, `tree`, `summary`, `render`, `event` | Reports and run log |
+| `grow init\|channel\|source\|read\|exp\|queue\|post\|video-check\|video-done\|tick\|brief\|report` | Growth mode: a campaign with one graph run per cycle, experiments with enforced rules, a permission queue for anything that posts (content-hash approval, 72 hour expiry, no auto-approve), a posting ladder, and video by code. The runtime records and gates; the model posts with host tools. See `references/protocol.md` |
 
 ## Start: read the user, pick tools, agree the plan
 

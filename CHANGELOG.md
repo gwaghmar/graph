@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added (growth mode)
+- `grow`: campaigns with one ordinary graph run per cycle. Experiments with a state machine enforced in code (one change, dated baseline before the change, one live experiment per metric and surface, no decision before the window end, below `min_sample` only inconclusive, stale or unknown readings cannot support a decision, a revert needs a `revert_ref` and a logged undo).
+- Metrics ladder: public numbers, the user's CLI or MCP, a CSV in `inbox/`, or typed. Unknown is a value, never 0. Every reading has a source, a method and a date.
+- Permission queue for anything that posts: content-hash approval, 72 hour expiry, no auto-approve, one card per item on the checkpoint screen, caps and gaps per channel, duplicate refusal, own accounts only, disclosure, replies only to listed threads.
+- Posting ladder recorded per post (API or CLI, MCP, logged-in browser, computer use). The runtime records and gates; the model posts with host tools.
+- Video by code: `video-check` (render output exists, duration above 0 by `ffprobe`, thumbnail by `ffmpeg`), `video-done`, and video cards with a thumbnail.
+- `grow tick` (one cycle, stops at the checkpoint, never posts, prints a host schedule hint), `grow brief` and `grow report` ("moved with", same-weekday comparison, unknowns by name).
+
 ### Fixed (third end-to-end findings)
 - Checkpoint: `--serve --background` starts the page detached, writes pid and port to `checkpoint.json`, and prints the link with its token at once. `--wait` and `--stop` added. The browser opens only with `--open`. GO records the request User-Agent class and the summary says "pressed GO from a browser" or "from a script (not proof of a human)". The honest limit is documented: the runtime cannot prove a human pressed GO.
 - SKILL.md: on a large job run find for every part and scan the top picks before asking anything, then show the checkpoint (link or multi-select) and end the turn.
