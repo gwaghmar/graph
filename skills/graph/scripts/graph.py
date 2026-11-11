@@ -227,7 +227,7 @@ def start_gaps(d):
                                 f"(or create the run with init --auto-approve \"<the user's words>\" if they already said to go ahead without review)"))
     gaps += [('outside', g) for g in outside_gaps(d)]
     if size_of(d) == 'large' and not d.get('checkpoint_built'):
-        gaps.append(('checkpoint', f"checkpoint: this is a large job. Run {c} checkpoint --run {rid} --serve (or --terminal) so the user can keep or drop items"))
+        gaps.append(('checkpoint', f"checkpoint: this is a large job. Run {c} checkpoint --run {rid} --serve --background (or --terminal) so the user can keep or drop items"))
     return gaps
 
 def tilde(text):
@@ -621,7 +621,7 @@ def run_info(d):
     toolkit='- Toolkit: '+('; '.join(f"{k} {', '.join(kit[k])}" for k in ('skills','plugins','clis','mcp') if kit.get(k)) or 'no extra tools')+f". Why: {short(kit['why'],80)}" if kit else '- Toolkit: not recorded.'
     approval=f"- Approval: {short(ap['note'],120)}" if ap else f"- Approval: skipped, the user said: {short(d['auto_approve'],120)}" if d.get('auto_approve') else '- Approval: not recorded.'
     src=(ap or {}).get('source')
-    how=('- Approval source: pressed GO at the checkpoint'+(f" (dropped: {short(', '.join(ap['drops']),100)})" if ap.get('drops') else '')+'.') if src=='checkpoint' else '- Approval source: recorded by the model. The runtime cannot prove a human wrote the note.' if ap else None
+    how=('- Approval source: '+checkpoint.pressed_text((ap.get('evidence') or {}).get('pressed_from'))+(f" (dropped: {short(', '.join(ap['drops']),100)})" if ap.get('drops') else '')+'.') if src=='checkpoint' else '- Approval source: recorded by the model. The runtime cannot prove a human wrote the note.' if ap else None
     sh=d.get('size_history') or []
     size_line=f"- Size: {size_of(d)}"+(' (changed: '+', '.join(f"{x.get('from')} to {x.get('to')}" for x in sh)+')' if sh else '')
     return [f"- Run date: {d.get('run_date') or 'unknown'}", size_line, f"- Stale context flagged: {st}", toolkit, approval]+([how] if how else [])+(
@@ -1189,10 +1189,11 @@ def approval_checks(d, run):
     gaps = outside_gaps(d)
     if gaps: die(3, f"Refused: each part needs a pick or a \"none found\" note first:\n" + '\n'.join('  - ' + g for g in gaps))
     if size_of(d) == 'large' and not d.get('checkpoint_built'):
-        die(3, f"Refused: this is a large job. Show the checkpoint first: {graph_cmd()} checkpoint --run {run} --serve (or --terminal). On Claude Code you may use the host's multi-select question with the same list.")
+        die(3, f"Refused: this is a large job. Show the checkpoint first: {graph_cmd()} checkpoint --run {run} --serve --background (or --terminal). On Claude Code you may use the host's multi-select question with the same list.")
 
-def record_approval(d, run, note, source, drops=(), a=None):
+def record_approval(d, run, note, source, drops=(), a=None, evidence=None):
     d['approval'] = {'at': now(), 'note': note[:500], 'plan': plan_hash(d), 'source': source}
+    if evidence: d['approval']['evidence'] = evidence
     if drops: d['approval']['drops'] = list(drops)
     if not d.get('skip_budget') and d.get('schema_version', 3) >= 5 and size_of(d) != 'small': d['budget'] = fresh_budget(d, a)
     lines = install_staged(d, run)
@@ -1313,7 +1314,7 @@ def cmd_scan(a):
     c = next((x for x in (doc or {}).get('candidates', []) if (x.get('repo') or '').lower() == a.pick.lower()), None)
     if not c: die(3, f'Refused: {a.pick} is not in the finds for part {a.part}. Run find (or candidate) first.')
     if not c.get('passes'): die(3, f"Refused: {a.pick} is below the trust bar ({c.get('why')}). It is hidden. Scan one of the top 3.")
-    res, err = outside.do_scan(c['repo'], a.run)
+    res, err = outside.do_scan(c['repo'], a.run, a.path)
     if err: die(1, f'Scan failed for {a.pick}: {err}. Nothing was installed. Try another pick.')
     res['part'] = a.part
     book = scan_book(a.run); book[c['repo']] = res; save(ROOT / a.run / 'scan.json', book)
@@ -1324,9 +1325,29 @@ def cmd_pick(a):
     doc = outside.load_doc(ROOT / a.run, a.part)
     c = next((x for x in (doc or {}).get('candidates', []) if (x.get('repo') or '').lower() == a.use.lower()), None)
     if not c or not c.get('passes'): die(3, f'Refused: {a.use} is not a shown find for part {a.part}.')
-    repo = c['repo']; r = scan_book(a.run).get(repo)
+    repo = c['repo']
+    if a.kind == 'package':
+        try: eco, pname = outside.parse_package(a.package)
+        except ValueError as e: die(2, str(e))
+        info, err = outside.check_package(eco, pname, repo)
+        if err: die(3, f'Refused: package {eco}:{pname} is not trusted: {err}.')
+        book = scan_book(a.run); book[repo] = {'repo': repo, 'verdict': 'package', 'files': 0, 'findings': [], 'part': a.part, 'stars': c.get('stars'), **info, 'at': now()}
+        save(ROOT / a.run / 'scan.json', book)
+        o = O(d); o['picks'] = [x for x in o['picks'] if not (x['part'] == a.part and x['use'] == repo)]
+        o['picks'].append({'part': a.part, 'use': repo, 'kind': 'package', 'package': info['package'], 'verdict': 'package', 'at': now(), 'status': 'ready'})
+        d['updated_at'] = now(); save(p, d)
+        print(f"Picked package {info['package']} for part {a.part}. It is installed by {eco}, not cloned and not scanned. Trust: " + (f"{info['downloads']:,} downloads last month, " if 'downloads' in info else '') + f"{c.get('stars')} GitHub stars.")
+        print(f"👉 Do this: install it with {eco} yourself after approve. Graph does not run it.")
+        return
+    r = scan_book(a.run).get(repo)
     if not r: die(3, f'Refused: {repo} was not scanned. Run {graph_cmd()} scan --run {a.run} --part {a.part} --pick {repo} first.')
     if r['verdict'] == 'block': die(3, f'Refused: the scan of {repo} says BLOCK. It cannot be picked. Pick another.')
+    if r['verdict'] == 'big':
+        if a.kind != 'reference': die(3, f'Refused: {repo} is too big to copy. Pick it as --as reference, or as --as package if it is a well-known package.')
+        o = O(d); o['picks'] = [x for x in o['picks'] if not (x['part'] == a.part and x['use'] == repo)]
+        o['picks'].append({'part': a.part, 'use': repo, 'kind': 'reference', 'verdict': 'big', 'at': now(), 'status': 'ready'})
+        d['updated_at'] = now(); save(p, d)
+        print(f'Picked {repo} as reference for part {a.part}. It is too big to copy. Read it on GitHub: https://github.com/{repo}  (not scanned, not copied)'); return
     if not outside.vendor_dir(repo).is_dir(): die(3, f'Refused: the scanned copy of {repo} is gone. Scan it again.')
     if a.kind == 'skill' and not outside.skill_dirs(outside.vendor_dir(repo)): die(3, f'Refused: {repo} has no SKILL.md, so it cannot be picked as a skill. Use --as reference or tool.')
     if r['verdict'] == 'warn' and a.kind != 'reference' and approved(d) and not (a.ok or '').strip():
@@ -1420,7 +1441,7 @@ def log_refusal(run, msg, cmd='checkpoint'):
     with contextlib.suppress(Exception):
         append_log(run, {'at': now(), 'cmd': cmd, 'node': None, 'args': {}, 'outcome': 'refused', 'exit_code': 3, 'message': clip(msg)})
 
-def apply_checkpoint(run, dropped, source='checkpoint'):
+def apply_checkpoint(run, dropped, source='checkpoint', evidence=None):
     """Record the user's keep/drop answer. Under the run lock. Refuses (exit 3) with a clear message; nothing is saved then."""
     with run_lock(run):
         p, d = load(run)
@@ -1447,13 +1468,17 @@ def apply_checkpoint(run, dropped, source='checkpoint'):
         approval_checks(d, run)
         names = [valid[x]['title'] for x in dropped]
         note = 'pressed GO' + (f" (dropped: {', '.join(names)})" if names else ' (kept everything)')
-        lines = record_approval(d, run, note, source, dropped)
+        lines = record_approval(d, run, note, source, dropped, evidence=evidence)
         return d, lines
 
-def serve_checkpoint(run, timeout, open_browser):
+CP_TIMEOUT = 1800
+
+def serve_checkpoint(run, timeout, open_browser, quiet=False):
+    """Serve the page on 127.0.0.1 until GO, stop or timeout. Writes checkpoint.json (pid, port, link, result)."""
     import http.server, secrets, urllib.parse
     token = secrets.token_urlsafe(18)
-    state = {'done': False, 'ok': None}
+    state = {'done': False, 'ok': None, 'stop': False}
+    rd = ROOT / run
     class H(http.server.BaseHTTPRequestHandler):
         timeout = 5  # per-connection socket timeout: an idle connection cannot block GO
         def log_message(self, *x): pass
@@ -1477,7 +1502,10 @@ def serve_checkpoint(run, timeout, open_browser):
             org = self.headers.get('Origin')
             if org is not None and org not in (f'http://127.0.0.1:{srv.server_port}', f'http://localhost:{srv.server_port}'):
                 log_refusal(run, 'checkpoint: wrong origin'); return self._send(403, json.dumps({'error': 'Forbidden'}))
-            if urllib.parse.urlsplit(self.path).path != '/go': return self._send(404, '{}')
+            path = urllib.parse.urlsplit(self.path).path
+            if path == '/stop':
+                state['stop'] = True; return self._send(200, json.dumps({'ok': True}))
+            if path != '/go': return self._send(404, '{}')
             try:
                 n = int(self.headers.get('Content-Length') or 0)
                 if not 0 <= n <= 65536: raise ValueError
@@ -1487,38 +1515,105 @@ def serve_checkpoint(run, timeout, open_browser):
                 if not isinstance(drops, list) or not all(isinstance(x, str) for x in drops): raise ValueError
             except (ValueError, TypeError):
                 return self._send(400, json.dumps({'error': 'Bad request.'}))
-            try: apply_checkpoint(run, drops)
+            cls = checkpoint.ua_class(self.headers.get('User-Agent'))  # class only: the header text is not stored
+            try: apply_checkpoint(run, drops, evidence={'pressed_from': cls})
             except SystemExit:
                 msg = CTX['msg'] or 'Refused.'; log_refusal(run, msg); return self._send(409, json.dumps({'error': msg}))
+            with contextlib.suppress(Exception):
+                append_log(run, {'at': now(), 'cmd': 'checkpoint', 'node': None, 'args': {'pressed_from': cls}, 'outcome': 'ok', 'exit_code': 0, 'message': checkpoint.pressed_text(cls)})
+            checkpoint.write_state(rd, status='approved', pressed_from=cls, drops=drops, done_at=now())
             state['done'] = True; state['ok'] = drops; self._send(200, json.dumps({'ok': True}))
     srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), H); srv.timeout = 0.5; srv.daemon_threads = True
     url = f'http://127.0.0.1:{srv.server_port}/?t={token}'
-    # The token goes to the browser only. It is not printed, because the agent reads stdout.
-    # GRAPH_CHECKPOINT_URL_FILE is a test hook: the full link is written there (mode 0600).
-    hook = os.environ.get('GRAPH_CHECKPOINT_URL_FILE')
-    if hook:
-        with contextlib.suppress(OSError):
-            fd = os.open(hook, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, 'w', encoding='utf-8') as fh: fh.write(url + '\n')
-    print(f'Open this page: http://127.0.0.1:{srv.server_port}/  (the page opens in the browser with its own one-time link)', flush=True)
-    if open_browser:
+    end = epoch() + timeout
+    checkpoint.write_state(rd, status='waiting', pid=os.getpid(), port=srv.server_port, url=url, started=now(), expires=end, pressed_from=None, drops=None)
+    # The human needs the link, so it is printed. Anyone who can read this output can press GO: the runtime cannot prove a human did.
+    if not quiet: print(f'Open this page: {url}', flush=True)
+    if open_browser:  # only when the user asked with --open
         opened = False
         with contextlib.suppress(Exception):
             import webbrowser; opened = bool(webbrowser.open(url))
-        if not opened: print('The browser did not open. Use `checkpoint --terminal` instead.', flush=True)
-    end = epoch() + timeout
+        if not opened and not quiet: print('The browser did not open. Use the link above, or `checkpoint --terminal`.', flush=True)
     try:
-        while not state['done'] and epoch() < end: srv.handle_request()
+        while not state['done'] and not state['stop'] and epoch() < end: srv.handle_request()
     finally: srv.server_close()
-    return state['ok']
+    if not state['done']: checkpoint.write_state(rd, status='stopped' if state['stop'] else 'timeout', done_at=now())
+    return state['ok'] if state['done'] else ('stopped' if state['stop'] else None)
+
+def cp_start_background(run, timeout, open_browser):
+    """Start the page server detached. It outlives this command. Print the link at once."""
+    import subprocess
+    rd = ROOT / run
+    st = checkpoint.live_state(rd)
+    if not (st and st.get('status') == 'waiting'):
+        with contextlib.suppress(OSError): checkpoint.state_path(rd).unlink()
+        cmd = [sys.executable, str(Path(__file__).resolve()), 'checkpoint', '--run', run, '--serve', '--serve-child', '--timeout', str(timeout)]
+        if open_browser: cmd.append('--open')
+        kw = {'stdin': subprocess.DEVNULL, 'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL, 'close_fds': True, 'cwd': os.getcwd()}
+        if os.name == 'nt': kw['creationflags'] = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        else: kw['start_new_session'] = True
+        try: proc = subprocess.Popen(cmd, **kw)
+        except OSError as e: die(1, f'Could not start the checkpoint server ({type(e).__name__}).')
+        end = time.time() + 15
+        while time.time() < end:
+            st = checkpoint.read_state(rd)
+            if st and st.get('status') == 'waiting' and st.get('pid') == proc.pid: break
+            if proc.poll() is not None: die(1, 'The checkpoint server stopped at once. Use --terminal instead.')
+            time.sleep(0.1)
+        else: die(1, 'The checkpoint server did not start in 15 seconds. Use --terminal instead.')
+        if open_browser: print('Opening the page in your browser (you asked for --open).')
+    c = graph_cmd()
+    print('✔ CHECKPOINT READY')
+    print(f"👉 Do this:\n  1. Give the user this link. It opens on this computer only: {st['url']}\n  2. End your turn, or run: {c} checkpoint --run {run} --wait\n  3. To close it: {c} checkpoint --run {run} --stop")
+    print('The runtime cannot prove a human pressed GO. The summary says what it saw.')
+
+def cp_wait(run, timeout):
+    rd = ROOT / run; end = epoch() + timeout
+    while True:
+        st = checkpoint.live_state(rd)
+        if not st: die(1, f'No checkpoint server for {run}. Run: {graph_cmd()} checkpoint --run {run} --serve --background')
+        if st['status'] != 'waiting': break
+        if epoch() >= end:
+            print(f"⏳ STILL WAITING. Nobody pressed GO yet.\n👉 Do this: tell the user the link, then run wait again: {graph_cmd()} checkpoint --run {run} --wait")
+            raise SystemExit(1)
+        time.sleep(0.3)
+    if st['status'] == 'approved':
+        dr = st.get('drops') or []
+        print('✔ GO PRESSED\n' + checkpoint.pressed_text(st.get('pressed_from')) + (f" (dropped: {', '.join(checkpoint.clean(x, 40) for x in dr)})" if dr else ' (kept everything)') + '.')
+        return
+    why = {'timeout': 'The checkpoint timed out.', 'stopped': 'The checkpoint was stopped.', 'dead': 'The checkpoint server is gone.'}.get(st['status'], 'The checkpoint ended.')
+    die(1, f'{why} Nothing was approved. Start it again: {graph_cmd()} checkpoint --run {run} --serve --background')
+
+def cp_stop(run):
+    import urllib.parse, urllib.request
+    rd = ROOT / run
+    st = checkpoint.live_state(rd)
+    if not st: print('No checkpoint server to stop.'); return
+    if st['status'] != 'waiting':
+        print(f"No checkpoint server to stop (it is {st['status']})."); return
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{int(st['port'])}/stop?t={urllib.parse.quote(urllib.parse.parse_qs(urllib.parse.urlsplit(str(st['url'])).query).get('t', [''])[0])}", data=b'{}', method='POST', headers={'User-Agent': 'graph-skill'})
+        with urllib.request.urlopen(req, timeout=5): pass
+    except Exception: pass
+    for _ in range(30):
+        cur = checkpoint.live_state(rd)
+        if cur and cur['status'] != 'waiting': break
+        time.sleep(0.1)
+    else: die(1, 'The checkpoint server did not stop. It ends by itself at its timeout.')
+    print('✔ Checkpoint stopped. Nothing was approved.')
 
 def cmd_checkpoint(a):
     p, d = load(a.run)
+    if sum(map(bool, (a.stop, a.wait, a.background))) > 1 or ((a.stop or a.wait) and (a.serve or a.terminal)): die(2, 'Use one of: --serve [--background], --wait, --stop or --terminal.')
+    if a.background and not a.serve: die(2, '--background goes with --serve.')
+    if a.stop: return cp_stop(a.run)
+    if a.wait: return cp_wait(a.run, a.timeout if a.timeout is not None else 600)
     if not d.get('nodes'): die(2, f'Run {a.run} has no nodes. Add the plan first.')
     with run_lock(a.run):
         _, d = load(a.run); d['checkpoint_built'] = True; d['updated_at'] = now(); save(p, d)
     m = checkpoint.model(d, ROOT / a.run)
     if a.serve and a.terminal: die(2, 'Use --serve or --terminal, not both.')
+    timeout = a.timeout if a.timeout is not None else CP_TIMEOUT
     if a.terminal:
         print(tilde(checkpoint.render_terminal(m)), flush=True)
         ids = [i['id'] for i in m['items']]
@@ -1527,16 +1622,20 @@ def cmd_checkpoint(a):
             if not line: die(1, 'No answer. Nothing was approved.')
             try: nums = checkpoint.parse_terminal(line, len(ids)); break
             except ValueError as e: print(str(e), flush=True)
-        _, lines = apply_checkpoint(a.run, [ids[n - 1] for n in sorted(nums)])
+        _, lines = apply_checkpoint(a.run, [ids[n - 1] for n in sorted(nums)], evidence={'pressed_from': 'terminal'})
+    elif a.serve and a.background:
+        return cp_start_background(a.run, timeout, a.open)
     elif a.serve:
-        drops = serve_checkpoint(a.run, a.timeout, not a.no_open)
+        drops = serve_checkpoint(a.run, timeout, a.open, quiet=a.serve_child)
+        if a.serve_child: return
         if drops is None: die(1, 'The checkpoint timed out. Nothing was approved.')
+        if drops == 'stopped': die(1, 'The checkpoint was stopped. Nothing was approved.')
         lines = []
     else:
         page = ROOT / a.run / 'checkpoint.html'
         page.write_text(checkpoint.render_html(m), encoding='utf-8')
         print(tilde(checkpoint.render_terminal(m, color=False)))
-        print(f'👉 Do this: show the user this list, or run {graph_cmd()} checkpoint --run {a.run} --serve  (page: {tilde(str(page))})')
+        print(f'👉 Do this: show the user this list, or run {graph_cmd()} checkpoint --run {a.run} --serve --background  (page: {tilde(str(page))})')
         return
     for l in lines: print(tilde(l))
     print('✔ Approved. Pressed GO at the checkpoint.')
@@ -1544,7 +1643,7 @@ def cmd_checkpoint(a):
 # ---- run log: .graph/runs/<id>/log.jsonl, append-only, one JSON line per command call ----
 LOG_ARGS = ('project_dir', 'text', 'note', 'why', 'skills', 'plugins', 'clis', 'mcp', 'task_text', 'auto_approve', 'skip_context', 'skip_preflight', 'goal', 'no_check', 'status', 'depends_on', 'check', 'target', 'risk', 'reason', 'command', 'type', 'needs', 'refresh',
             'with_accounts', 'include_dependents', 'skip_budget', 'left_pct', 'resets', 'from_level', 'not_before', 'host', 'session', 'needs', 'effort', 'model',
-            'part', 'query', 'url', 'mentions', 'pick', 'use', 'kind', 'ok', 'set', 'argv', 'where', 'no_sandbox', 'size', 'main', 'name', 'serve', 'terminal', 'no_open')
+            'part', 'query', 'url', 'mentions', 'pick', 'use', 'kind', 'ok', 'set', 'argv', 'where', 'no_sandbox', 'size', 'main', 'name', 'serve', 'terminal', 'no_open', 'open', 'background', 'wait', 'stop', 'serve_child', 'package', 'path')
 
 def log_path(run_id): return ROOT / run_id / 'log.jsonl'
 
@@ -1648,11 +1747,11 @@ def main():
     x=sp.add_parser('part-none');x.add_argument('--run',required=True);x.add_argument('--part',required=True);x.add_argument('--note');x.set_defaults(fn=cmd_part_none)
     x=sp.add_parser('find');x.add_argument('--run',required=True);x.add_argument('--part',required=True);x.add_argument('--query');x.set_defaults(fn=cmd_find,nolock=True)
     x=sp.add_parser('candidate');x.add_argument('--run',required=True);x.add_argument('--part',required=True);x.add_argument('--url',required=True);x.add_argument('--mentions',type=int,default=1);x.add_argument('--note');x.set_defaults(fn=cmd_candidate,nolock=True)
-    x=sp.add_parser('scan');x.add_argument('--run',required=True);x.add_argument('--part',required=True);x.add_argument('--pick',required=True);x.set_defaults(fn=cmd_scan,nolock=True)
-    x=sp.add_parser('pick');x.add_argument('--run',required=True);x.add_argument('--part',required=True);x.add_argument('--use',required=True);x.add_argument('--as',dest='kind',choices=['skill','reference','tool'],default='reference');x.add_argument('--ok');x.set_defaults(fn=cmd_pick)
+    x=sp.add_parser('scan');x.add_argument('--run',required=True);x.add_argument('--part',required=True);x.add_argument('--pick',required=True);x.add_argument('--path');x.set_defaults(fn=cmd_scan,nolock=True)
+    x=sp.add_parser('pick');x.add_argument('--run',required=True);x.add_argument('--part',required=True);x.add_argument('--use',required=True);x.add_argument('--as',dest='kind',choices=['skill','reference','tool','package'],default='reference');x.add_argument('--package');x.add_argument('--ok');x.set_defaults(fn=cmd_pick)
     x=sp.add_parser('size');x.add_argument('--run',required=True);x.add_argument('--to',dest='size',choices=list(SIZES),required=True);x.set_defaults(fn=cmd_size)
     x=sp.add_parser('feature');x.add_argument('--run',required=True);x.add_argument('--name',required=True);x.add_argument('--why');x.set_defaults(fn=cmd_feature)
-    x=sp.add_parser('checkpoint');x.add_argument('--run',required=True);x.add_argument('--serve',action='store_true');x.add_argument('--terminal',action='store_true');x.add_argument('--no-open',dest='no_open',action='store_true');x.add_argument('--timeout',type=int,default=1800);x.set_defaults(fn=cmd_checkpoint,nolock=True)
+    x=sp.add_parser('checkpoint');x.add_argument('--run',required=True);x.add_argument('--serve',action='store_true');x.add_argument('--terminal',action='store_true');x.add_argument('--no-open',dest='no_open',action='store_true');x.add_argument('--open',action='store_true');x.add_argument('--background',action='store_true');x.add_argument('--wait',action='store_true');x.add_argument('--stop',action='store_true');x.add_argument('--serve-child',dest='serve_child',action='store_true',help=argparse.SUPPRESS);x.add_argument('--timeout',type=int,default=None);x.set_defaults(fn=cmd_checkpoint,nolock=True)
     x=sp.add_parser('keep');x.add_argument('--run',required=True);x.add_argument('--pick',required=True);x.set_defaults(fn=cmd_keep)
     x=sp.add_parser('vendor-run');x.add_argument('--run',required=True);x.add_argument('--pick',required=True);x.add_argument('--in',dest='where',choices=['vendor','project'],default='vendor');x.add_argument('--timeout',type=int,default=300);x.add_argument('--no-sandbox',dest='no_sandbox',action='store_true');x.add_argument('cmd',nargs=argparse.REMAINDER);x.set_defaults(fn=cmd_vendor_run,nolock=True)
     a=ap.parse_args()

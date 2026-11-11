@@ -45,8 +45,8 @@ class CP(GraphCase):
         uf = os.path.join(self.dir, 'url.txt')
         p = self.popen('--serve', '--no-open', env={'GRAPH_CHECKPOINT_URL_FILE': uf}); self.addCleanup(self.reap, p)
         line = p.stdout.readline()
-        self.assertIn('http://127.0.0.1:', line); self.assertNotIn('?t=', line)   # the token is never printed
-        url = Path(uf).read_text(encoding='utf-8').strip()
+        self.assertIn('http://127.0.0.1:', line); self.assertIn('?t=', line)   # the human needs the link, so it is printed
+        url = line.split('Open this page:')[1].strip()
         return p, url
 
     def post(self, url, drops, token_ok=True):
@@ -237,7 +237,7 @@ class StyleTests(CP):
         s = self.path('summary.md').read_text(encoding='utf-8')
         self.assertTrue(s.startswith('# '))
         self.assertLess(s.index('Do this'), s.index('\n---\n')); self.assertLess(s.index('\n---\n'), s.index('## Run summary'))
-        self.assertIn('pressed GO at the checkpoint', s)
+        self.assertIn('pressed GO in the terminal', s)
         self.assertLessEqual(len([l for l in s.split('\n---\n')[0].splitlines() if l[:2] in ('1.', '2.', '3.', '4.')]), 3)
 
     def test_model_approval_is_marked(self):
@@ -252,6 +252,99 @@ class StyleTests(CP):
         err = self.node('a', 'running', code=3).stderr
         self.assertTrue(err.startswith('✖ STOPPED')); self.assertIn('👉 Do this', err)
         self.assertNotIn(str(Path.home()) + '/', err)
+
+
+class BackgroundTests(CP):
+    def bg(self, *extra):
+        r = self.g('checkpoint', '--run', 'r1', '--serve', '--background', *extra)
+        url = [w for w in r.stdout.split() if w.startswith('http://127.0.0.1:')][0]
+        st = json.loads(self.path('checkpoint.json').read_text(encoding='utf-8'))
+        self.addCleanup(self.kill, st)
+        return r, url, st
+
+    def kill(self, st):
+        try: urllib.request.urlopen(urllib.request.Request(st['url'].replace('/?t=', '/stop?t='), data=b'{}', method='POST'), timeout=3).read()
+        except Exception: pass
+
+    def post_ua(self, url, drops, ua):
+        u = url.replace('/?t=', '/go?t=')
+        req = urllib.request.Request(u, data=json.dumps({'dropped': drops}).encode(), method='POST', headers={'Content-Type': 'application/json', 'User-Agent': ua})
+        with urllib.request.urlopen(req, timeout=10) as r: return r.status
+
+    def test_background_returns_at_once_with_token_and_pid_port(self):
+        self.start(); self.plan()
+        import time as _t
+        t = _t.time(); r, url, st = self.bg(); self.assertLess(_t.time() - t, 12)
+        self.assertIn('?t=', r.stdout); self.assertIn('CHECKPOINT READY', r.stdout); self.assertIn('--wait', r.stdout)
+        self.assertEqual(st['status'], 'waiting'); self.assertTrue(isinstance(st['pid'], int)); self.assertEqual(url, st['url'])
+        self.assertEqual(st['port'], int(url.split(':')[2].split('/')[0]))
+        with urllib.request.urlopen(url, timeout=10) as resp: self.assertIn('GO', resp.read().decode())   # server outlived the command
+        self.assertEqual(oct(os.stat(self.path('checkpoint.json')).st_mode & 0o777), oct(0o600) if os.name != 'nt' else oct(os.stat(self.path('checkpoint.json')).st_mode & 0o777))
+        r2 = self.g('checkpoint', '--run', 'r1', '--serve', '--background')                  # second call reuses the live server
+        self.assertIn(url, r2.stdout)
+
+    def test_no_browser_without_open_flag(self):
+        self.start(); self.plan()
+        marker = os.path.join(self.dir, 'opened.txt')
+        shim = os.path.join(self.dir, 'sitecustomize.py')
+        Path(shim).write_text("import webbrowser\ndef _o(*a, **k):\n    open(%r, 'w').write('x'); return True\nwebbrowser.open = _o\n" % marker, encoding='utf-8')
+        env = dict(os.environ, PYTHONPATH=self.dir)
+        subprocess.run([sys.executable, GRAPH, 'checkpoint', '--run', 'r1', '--serve', '--background'], cwd=self.dir, env=env, capture_output=True, text=True, timeout=30)
+        st = json.loads(self.path('checkpoint.json').read_text(encoding='utf-8')); self.addCleanup(self.kill, st)
+        import time as _t; _t.sleep(0.5)
+        self.assertFalse(os.path.exists(marker))
+
+    def test_wait_reports_browser_and_summary_says_so(self):
+        self.start(); self.plan()
+        r, url, st = self.bg()
+        w = self.g('checkpoint', '--run', 'r1', '--wait', '--timeout', '1', code=1)            # nobody pressed GO yet
+        self.assertIn('STILL WAITING', w.stdout)
+        self.assertEqual(self.post_ua(url, ['node:c'], 'Mozilla/5.0 (Macintosh) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17 Safari/605.1.15'), 200)
+        w = self.g('checkpoint', '--run', 'r1', '--wait', '--timeout', '5')
+        self.assertIn('pressed GO from a browser', w.stdout)
+        ap = self.state()['approval']; self.assertEqual(ap['evidence'], {'pressed_from': 'browser'})
+        for n in 'ab': self.ran(n)
+        self.g('finish', 'r1', '--status', 'complete')
+        self.assertIn('pressed GO from a browser', self.path('summary.md').read_text(encoding='utf-8'))
+        self.assertTrue(any(e['cmd'] == 'checkpoint' and (e.get('args') or {}).get('pressed_from') == 'browser' for e in self.log()))
+        self.assertTrue(any(e['cmd'] == 'checkpoint' and (e.get('args') or {}).get('wait') for e in self.log()))
+
+    def test_script_press_is_marked_not_proof(self):
+        self.start(); self.plan()
+        r, url, st = self.bg()
+        self.assertEqual(self.post_ua(url, [], 'curl/8.4.0'), 200)
+        w = self.g('checkpoint', '--run', 'r1', '--wait', '--timeout', '5')
+        self.assertIn('pressed GO from a script (not proof of a human)', w.stdout)
+        for n in 'abc': self.ran(n)
+        self.g('finish', 'r1', '--status', 'complete')
+        self.assertIn('pressed GO from a script (not proof of a human)', self.path('summary.md').read_text(encoding='utf-8'))
+
+    def test_ua_class(self):
+        self.assertEqual(checkpoint.ua_class('Mozilla/5.0 (X11; Linux) Gecko/20100101 Firefox/120.0'), 'browser')
+        for ua in ('curl/8.1', 'Python-urllib/3.12', '', None, 'graph-skill'): self.assertEqual(checkpoint.ua_class(ua), 'script')
+
+    def test_stop_and_wait_after_stop(self):
+        self.start(); self.plan()
+        r, url, st = self.bg()
+        s = self.g('checkpoint', '--run', 'r1', '--stop')
+        self.assertIn('stopped', s.stdout)
+        self.assertEqual(json.loads(self.path('checkpoint.json').read_text(encoding='utf-8'))['status'], 'stopped')
+        with self.assertRaises(Exception): urllib.request.urlopen(url, timeout=3)
+        w = self.g('checkpoint', '--run', 'r1', '--wait', '--timeout', '2', code=1)
+        self.assertIn('stopped', w.stderr); self.assertNotIn('approval', self.state())
+        self.assertIn('No checkpoint server', self.g('checkpoint', '--run', 'r1', '--stop').stdout)
+
+    def test_dead_server_is_reported(self):
+        self.start(); self.plan()
+        self.path('checkpoint.json').write_text(json.dumps({'status': 'waiting', 'pid': 1, 'port': 1, 'url': 'http://127.0.0.1:1/?t=x', 'expires': 9999999999}), encoding='utf-8')
+        w = self.g('checkpoint', '--run', 'r1', '--wait', '--timeout', '2', code=1)
+        self.assertIn('gone', w.stderr)
+
+    def test_flag_mixups_are_refused_and_logged(self):
+        self.start(); self.plan()
+        self.g('checkpoint', '--run', 'r1', '--wait', '--stop', code=2)
+        self.g('checkpoint', '--run', 'r1', '--background', code=2)
+        self.assertGreaterEqual(len([e for e in self.log() if e['cmd'] == 'checkpoint' and e['outcome'] == 'invalid']), 2)
 
 
 if __name__ == '__main__':

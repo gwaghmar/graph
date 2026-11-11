@@ -12,8 +12,8 @@ FIX = Path(__file__).resolve().parent / 'fixtures-legacy'
 def iso(t): return time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(t)) + f'.{int((t % 1) * 1000):03d}Z'
 
 
-def line(mid, model, ts, inp=0, out=0, cr=0, cw=0, think=0, rid='req', agent=None, content='SECRET-MESSAGE-BODY'):
-    o = {'type': 'assistant', 'timestamp': iso(ts), 'sessionId': 's1', 'requestId': rid, 'isSidechain': bool(agent),
+def line(mid, model, ts, inp=0, out=0, cr=0, cw=0, think=0, rid='req', agent=None, content='SECRET-MESSAGE-BODY', sid='s1'):
+    o = {'type': 'assistant', 'timestamp': iso(ts), 'sessionId': sid, 'requestId': rid, 'isSidechain': bool(agent),
          'message': {'id': mid, 'model': model, 'content': content,
                      'usage': {'input_tokens': inp, 'output_tokens': out, 'cache_read_input_tokens': cr, 'cache_creation_input_tokens': cw,
                                'output_tokens_details': {'thinking_tokens': think}}}}
@@ -50,6 +50,38 @@ class UsageCase(Base):
 
 
 class Ledger(UsageCase):
+    def test_every_session_and_subagent_in_the_window_counts(self):
+        """A run with several headless calls: each call is its own session file, with its own subagent files."""
+        t = self.t
+        self.lines('sA.jsonl', [line('a1', MA, t, inp=100, out=10, rid='ra1', sid='sA'), line('shared', MA, t, inp=1, out=1, rid='rs', sid='sA')])
+        self.lines('sB.jsonl', [line('b1', MA, t, inp=200, out=20, rid='rb1', sid='sB'), line('shared', MA, t, inp=1, out=1, rid='rs', sid='sB')])  # resumed copy of one message
+        self.lines('sA/subagents/agent-aa1.jsonl', [line('sa1', MB, t, inp=1000, out=100, rid='rsa', agent='aa1', sid='sA')])
+        self.lines('sB/subagents/agent-bb1.jsonl', [line('sb1', MB, t, inp=2000, out=200, rid='rsb', agent='bb1', sid='sB')])
+        self.lines('sOld.jsonl', [line('o1', MA, t - 3600, inp=99999, out=99999, rid='ro', sid='sOld')])     # before the run window
+        other = self.home / '.claude' / 'projects' / 'some-other-project'
+        write(other / 'sX.jsonl', line('x1', MA, t, inp=88888, out=88888, rid='rx', sid='sX') + '\n')      # another project
+        self.usage()
+        u = self.ustate()
+        self.assertEqual(u['totals']['input'], 100 + 200 + 1 + 1000 + 2000)    # the shared message once
+        self.assertEqual(u['totals']['output'], 10 + 20 + 1 + 100 + 200)
+        self.assertEqual(u['sessions'], 2); self.assertEqual(len(u['agents']), 2)
+        self.assertIn('Counted 2 host sessions', self.g('usage', '--run', 'r1', '--host', 'claude-code').stdout)
+
+    def test_sessions_from_a_subfolder_count_but_a_similar_sibling_does_not(self):
+        t = self.t
+        def put(dirname, cwd, mid, inp):
+            o = json.loads(line(mid, MA, t, inp=inp, out=1, rid=mid, sid='s' + mid)); o['cwd'] = str(cwd)
+            write(self.home / '.claude' / 'projects' / dirname / f's{mid}.jsonl', json.dumps(o) + '\n')
+        enc = re.sub(r'[^A-Za-z0-9]', '-', str(self.proj))
+        put(enc, self.proj, 'm0', 1)
+        put(enc + '-src', self.proj / 'src', 'm1', 10)                       # headless call started in a sub folder
+        put(enc + '-2', Path(str(self.proj) + '-2'), 'm2', 1000)             # a different project with a longer name
+        put(enc + '-nocwd', self.proj / 'x', 'm3', 100000)
+        o = json.loads(line('m4', MA, t, inp=7, out=1, rid='m4', sid='sm4')); o.pop('cwd', None)
+        write(self.home / '.claude' / 'projects' / (enc + '-nocwd2') / 'sm4.jsonl', json.dumps(o) + '\n')   # no cwd on the line: not counted
+        self.usage()
+        self.assertEqual(self.ustate()['totals']['input'], 1 + 10 + 100000)
+
     def test_dedupe_and_totals(self):
         t = self.t
         self.lines('s1.jsonl', [

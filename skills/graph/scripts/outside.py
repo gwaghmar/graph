@@ -300,6 +300,10 @@ SHELL_LINE = re.compile(r'^\s*(\$\s|sudo\s|rm\s|chmod\s|bash\s|sh\s|zsh\s|python
 COMMENT = re.compile(r'<!--(.*?)-->', re.S)
 COMMENT_BAD = re.compile(r'\b(ignore|instructions?|you must|you should|assistant|system prompt|do not tell|run|execute|curl|wget|send|secret|token|password|always|never)\b', I)
 HIDDEN_CH = re.compile(r'[​-‏‪-‮⁠-⁤﻿]|[\U000e0000-\U000e007f]')
+AGENT_FILES = {'skill.md', 'agents.md', 'claude.md'}
+AGENT_DIRS = {'prompts', 'commands', 'agents'}
+LEGAL_FILE = re.compile(r'^(licen[sc]e|copying|notice|copyright|unlicense)([._-][a-z0-9._-]*)?$', I)
+MD_LINK = re.compile(r'\[[^\]\n]*\]\(\s*<?https?://[^)\n]*\)|^\s*\[[^\]\n]+\]:\s*<?https?://\S+|<https?://[^>\s]+>')
 LIFECYCLE = ('preinstall', 'install', 'postinstall', 'prepare', 'prepack', 'prepublish', 'prepublishOnly')
 
 def add(F, level, rule, rel, line=0): F.append({'level': level, 'rule': rule, 'file': clean(rel, 120), 'line': line})
@@ -319,6 +323,10 @@ def scan_frontmatter(F, rel, text):
                 if nxt.startswith((' ', '\t', '-')): val += ' ' + nxt
                 else: break
             if '*' in val or re.search(r'\bBash\b(?!\s*\()', val): add(F, 'block', 'SKILL.md frontmatter allows tools with a wildcard', rel, i + 2)
+
+def is_agent_file(rel):
+    parts = rel.lower().split('/')
+    return parts[-1] in AGENT_FILES or parts[-1].endswith('.mdc') or any(x in AGENT_DIRS for x in parts[:-1])
 
 def scan_file(F, root, path):
     rel = path.relative_to(root).as_posix()
@@ -341,22 +349,28 @@ def scan_file(F, root, path):
                     add(F, 'block' if bad else 'warn', f'package.json runs "{k}" on install' + (' and it fetches or hides code' if bad else ''), rel, line_of(text, text.find(k)))
     if name == 'setup.py': add(F, 'warn', 'setup.py runs code on install', rel)
     if name == 'pyproject.toml' and re.search(r'cmdclass|build-backend\s*=\s*["\'](?!setuptools|hatchling|flit|poetry|pdm)', text): add(F, 'warn', 'pyproject build hook', rel)
-    if ext in DOC_EXT or name == 'skill.md':
+    legal = bool(LEGAL_FILE.match(name))
+    agent = is_agent_file(rel)
+    is_code = ext not in DOC_EXT and not legal
+    strict = 'block' if (agent or is_code) else 'warn'  # in plain docs the strict rules are a warning, not a block
+    if ext in DOC_EXT or name == 'skill.md' or legal:
         for rx in INJECT:
             m = rx.search(text)
-            if m: add(F, 'block', 'prompt-injection phrase', rel, line_of(text, m.start())); break
+            if m: add(F, strict, 'prompt-injection phrase', rel, line_of(text, m.start())); break
         for m in COMMENT.finditer(text):
-            if COMMENT_BAD.search(m.group(1)): add(F, 'block', 'hidden html comment with instructions', rel, line_of(text, m.start())); break
+            if COMMENT_BAD.search(m.group(1)): add(F, strict, 'hidden html comment with instructions', rel, line_of(text, m.start())); break
         m = HIDDEN_CH.search(text)
-        if m and ext in ('.md', '.mdc', '.txt'): add(F, 'block', 'hidden unicode characters in text', rel, line_of(text, m.start()))
-    is_code = ext not in DOC_EXT
-    is_prose = ext in ('.md', '.mdc', '.txt') or name == 'skill.md'
+        if m and (ext in ('.md', '.mdc', '.txt') or legal): add(F, strict, 'hidden unicode characters in text', rel, line_of(text, m.start()))
+    is_prose = ext in ('.md', '.mdc', '.txt') or name == 'skill.md' or legal
     seen, has_secret, has_net = set(), None, False
     prose_rules = [r for r in CODE_RULES if r[1] == 'pipes a download into a shell']  # secret places in prose are judged per file below
     for i, ln in enumerate(text.splitlines(), 1):  # every line, whole, no length cut-off
         if BLOB.search(ln) and 'blob' not in seen: seen.add('blob'); add(F, 'warn', 'long encoded or obfuscated blob', rel, i)
         if has_secret is None and SECRET_TOK.search(ln): has_secret = i
-        if not has_net and NET_TOK.search(ln): has_net = True
+        nl = ln
+        if legal: nl = ''  # license text has links, they are not network use
+        elif not agent and not is_code: nl = MD_LINK.sub(' ', ln)  # markdown links in plain docs are not network use
+        if not has_net and NET_TOK.search(nl): has_net = True
         if is_code: rules = CODE_RULES
         elif is_prose: rules = prose_rules
         else: rules = []
@@ -364,7 +378,7 @@ def scan_file(F, root, path):
             if rule not in seen and rx.search(ln): seen.add(rule); add(F, level, rule, rel, i)
         if name == 'skill.md' and 'skill-run' not in seen and SHELL_LINE.search(ln): seen.add('skill-run'); add(F, 'warn', 'SKILL.md has a shell command', rel, i)
         if name == 'skill.md' and 'skill-url' not in seen and NET_TOK.search(ln): seen.add('skill-url'); add(F, 'warn', 'SKILL.md has a URL or network command', rel, i)
-    if has_secret and has_net: add(F, 'block', 'names a secret place and uses the network in one file', rel, has_secret)
+    if has_secret and has_net: add(F, strict, 'names a secret place and uses the network in one file', rel, has_secret)
     elif has_secret and (is_code or is_prose) and 'reads a secret place (ssh, cloud, keychain, browser)' not in seen: add(F, 'warn', 'names a secret place', rel, has_secret)
 
 def scan_tree(root):
@@ -397,7 +411,8 @@ def verdict(F): return 'block' if any(f['level'] == 'block' for f in F) else 'wa
 
 def tree_size(root):
     tot = 0
-    for dp, _, files in os.walk(root):
+    for dp, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if d != '.git']  # only what is scanned counts, not git's own data
         for f in files:
             with contextlib.suppress(OSError): tot += os.lstat(os.path.join(dp, f)).st_size
     return tot
@@ -407,16 +422,44 @@ def rmtree(p):
         with contextlib.suppress(OSError): os.chmod(path, stat.S_IWRITE); fn(path)
     shutil.rmtree(p, onerror=onerr)
 
-def clone(repo, dest):
-    """Shallow clone of a public repo into dest. Return None or an error text. No hooks, no prompts, no credentials."""
+def git_env():
     # Scrubbed env: no user git config (insteadOf rewrites, filters), no ssh agent, no tokens.
     env = {k: v for k, v in os.environ.items() if k in ('PATH', 'LANG', 'SYSTEMROOT', 'COMSPEC', 'PATHEXT', 'TMPDIR', 'TEMP', 'TMP', 'HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY', 'SSL_CERT_FILE')}
     env.update(GIT_TERMINAL_PROMPT='0', GCM_INTERACTIVE='never', GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1', GIT_LFS_SKIP_SMUDGE='1', GIT_ASKPASS='', SSH_ASKPASS='')
-    cmd = ['git', '-c', 'credential.helper=', '-c', 'core.sshCommand=false', '-c', 'core.hooksPath=' + os.devnull, '-c', 'protocol.ext.allow=never', 'clone', '--depth', '1', '--no-tags', '--single-branch', '--', f'https://github.com/{repo}.git', str(dest)]
-    try: r = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=CLONE_TIMEOUT, env=env, stdin=subprocess.DEVNULL)
-    except subprocess.TimeoutExpired: return f'clone took longer than {CLONE_TIMEOUT} seconds'
-    except OSError as e: return f'git is not available ({type(e).__name__})'
-    return None if r.returncode == 0 else 'clone failed: ' + clean(r.stderr, 120)
+    return env
+
+GIT_SAFE = ['git', '-c', 'credential.helper=', '-c', 'core.sshCommand=false', '-c', 'core.hooksPath=' + os.devnull, '-c', 'protocol.ext.allow=never']
+
+def git(args, cwd=None, timeout=CLONE_TIMEOUT):
+    """Run one git command with the scrubbed env. Return (stdout, error text or None)."""
+    try: r = subprocess.run(GIT_SAFE + list(args), capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=timeout, env=git_env(), stdin=subprocess.DEVNULL, cwd=cwd)
+    except subprocess.TimeoutExpired: return '', f'git took longer than {timeout} seconds'
+    except OSError as e: return '', f'git is not available ({type(e).__name__})'
+    return (r.stdout, None) if r.returncode == 0 else ('', 'git failed: ' + clean(r.stderr, 120))
+
+def clone(repo, dest, sparse=False):
+    """Shallow clone of a public repo into dest. Return None or an error text. No hooks, no prompts, no credentials.
+    sparse=True is a partial clone (no file contents yet, only the top folder checked out)."""
+    extra = ['--filter=blob:none', '--sparse'] if sparse else []
+    _, err = git(['clone', '--depth', '1', '--no-tags', '--single-branch', *extra, '--', f'https://github.com/{repo}.git', str(dest)])
+    return err.replace('git failed: ', 'clone failed: ') if err and err.startswith('git failed') else err
+
+def sparse_skill_dirs(dest, only=None):
+    """In a partial clone: folders (up to 3 levels down, max 10) that hold a SKILL.md, or just `only`. Folder names are validated."""
+    if only: return [only]
+    out, err = git(['ls-tree', '-r', '--name-only', 'HEAD'], cwd=dest)
+    if err: return []
+    dirs = []
+    for ln in out.splitlines():
+        parts = ln.split('/')
+        if parts[-1] == 'SKILL.md' and len(parts) - 1 <= 3 and all(re.match(r'^[A-Za-z0-9_. -]{1,80}$', x) and x not in ('.', '..') for x in parts[:-1]):
+            dirs.append('/'.join(parts[:-1]))
+    return sorted(set(dirs))[:10]
+
+def safe_subpath(path):
+    p = (path or '').strip().strip('/')
+    ok = bool(p) and not p.startswith('-') and all(re.match(r'^[A-Za-z0-9_. -]{1,80}$', x) and x not in ('.', '..') for x in p.split('/')) and len(p.split('/')) <= 4
+    return p if ok else None
 
 def head_commit(dest):
     with contextlib.suppress(Exception):
@@ -424,35 +467,108 @@ def head_commit(dest):
         if r.returncode == 0: return r.stdout.strip()[:40]
     return None
 
-def do_scan(repo, run=None):
-    """Clone into .graph/vendor, scan, drop .git. Return (result dict, error)."""
-    dest = vendor_dir(repo)
-    if dest.exists(): rmtree(dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    err = clone(repo, dest)
-    if err:
-        if dest.exists(): rmtree(dest)
-        return None, err
-    size = tree_size(dest)
-    if size > CLONE_MAX:
-        rmtree(dest); return None, f'repo is {size // 1048576} MB, the limit is {CLONE_MAX // 1048576} MB'
+def finish_scan(dest, repo, run):
     commit = head_commit(dest)
     F, n = scan_tree(dest)
     if (dest / '.git').exists(): rmtree(dest / '.git')
     with contextlib.suppress(OSError): (dest / MARKER).write_text(json.dumps({'owner': 'graph-skill', 'run': run, 'source': repo}) + '\n', encoding='utf-8')
     F.sort(key=lambda f: (f['level'] != 'block', f['file'], f['line']))
-    return {'repo': repo, 'verdict': verdict(F), 'files': n, 'commit': commit, 'findings': F, 'at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}, None
+    return {'repo': repo, 'verdict': verdict(F), 'files': n, 'commit': commit, 'findings': F, 'at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}
+
+def big_result(repo, why):
+    return {'repo': repo, 'verdict': 'big', 'files': 0, 'commit': None, 'findings': [], 'note': f'too big: reference only ({why})', 'at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}
+
+def do_scan(repo, run=None, path=None):
+    """Clone into .graph/vendor, scan, drop .git. Return (result dict, error).
+    A repo over the size limit gets a sparse partial clone of only its skill folders (or --path). If that does not fit
+    or there is no skill folder, the result is verdict 'big': reference only, nothing copied."""
+    dest = vendor_dir(repo)
+    if dest.exists(): rmtree(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    sub = None
+    if path:
+        sub = safe_subpath(path)
+        if not sub: return None, '--path must be a plain folder name inside the repo'
+    if not sub:
+        err = clone(repo, dest)
+        if err:
+            if dest.exists(): rmtree(dest)
+            return None, err
+        size = tree_size(dest)
+        if size <= CLONE_MAX: return finish_scan(dest, repo, run), None
+        rmtree(dest)
+    reason = 'the whole repo is over the limit' if not sub else 'only the --path folder was fetched'
+    err = clone(repo, dest, sparse=True)
+    if err:
+        if dest.exists(): rmtree(dest)
+        return None, err
+    dirs = sparse_skill_dirs(dest, sub)
+    if not dirs:
+        rmtree(dest); return big_result(repo, f'{reason}, no skill folder found'), None
+    _, err = git(['sparse-checkout', 'set', '--cone', *dirs], cwd=dest)
+    if err:
+        rmtree(dest); return big_result(repo, f'{reason}, partial fetch failed'), None
+    if tree_size(dest) > CLONE_MAX:
+        rmtree(dest); return big_result(repo, f'{reason}, the skill folders are still over {CLONE_MAX // 1048576} MB'), None
+    res = finish_scan(dest, repo, run); res['sparse'] = dirs
+    return res, None
 
 def show_scan(res, run, part, cmd_prefix):
     v = res['verdict']
-    col = {'clean': '1;32', 'warn': '1;33', 'block': '1;31'}[v]
-    L = [paint(f"SCAN: {res['repo']}  =  {v.upper()}", col), f"files scanned: {res['files']}   findings: {len(res['findings'])}"]
+    col = {'clean': '1;32', 'warn': '1;33', 'block': '1;31', 'big': '1;33', 'package': '1;33'}[v]
+    L = [paint(f"SCAN: {res['repo']}  =  {'TOO BIG' if v == 'big' else v.upper()}", col), f"files scanned: {res['files']}   findings: {len(res['findings'])}"]
+    if res.get('sparse'): L.append('only fetched: ' + ', '.join(clean(x, 40) for x in res['sparse']))
+    if v == 'big':
+        L.append(paint(res.get('note') or 'too big: reference only', '1;33'))
+        L.append(paint(f"DO THIS: use it as a reference only: {cmd_prefix} pick --run {run} --part {part} --use {res['repo']} --as reference\n         Or if it is a well-known package: ... --as package --package npm:<name> (or pip:<name>)", '1;36'))
+        return '\n'.join(L)
     for f in res['findings'][:10]:
         L.append(f"  [{f['level']}] {f['file']}" + (f":{f['line']}" if f['line'] else '') + f"  {f['rule']}")
     if len(res['findings']) > 10: L.append(f"  ... {len(res['findings']) - 10} more in the scan file")
     if v == 'block': L.append(paint('BLOCKED. This one cannot be picked. Pick another.', '1;31'))
     else: L.append(paint(f"DO THIS: show this to the user. If they keep it: {cmd_prefix} pick --run {run} --part {part} --use {res['repo']} --as skill|reference|tool", '1;36'))
     return '\n'.join(L)
+
+# ---------- packages: well-known packages are installed by npm or pip, not cloned ----------
+PKG_ECOS = ('npm', 'pip')
+NPM_RE = re.compile(r'^(@[a-z0-9][a-z0-9._-]{0,60}/)?[a-z0-9][a-z0-9._-]{0,60}$')
+PIP_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,60}$')
+NPM_MIN_DOWNLOADS = 10_000  # per month
+
+def parse_package(spec):
+    """'npm:shadcn' or 'pip:requests' -> (eco, name). Raises ValueError with a short message."""
+    eco, _, name = str(spec or '').partition(':')
+    if eco not in PKG_ECOS or not name: raise ValueError('--package must look like npm:<name> or pip:<name>.')
+    if not (NPM_RE if eco == 'npm' else PIP_RE).match(name): raise ValueError('That package name is not valid.')
+    return eco, name
+
+def repo_in_url(url, repo):
+    m = GH_LINK.search(str(url or ''))
+    return bool(m) and repo_key(*m.groups()).lower() == repo.lower()
+
+def check_package(eco, name, repo):
+    """Trust from registry data (no clone, no install). npm: last-month downloads. PyPI: the project JSON.
+    Both must point back to the repo. Return (info dict, error)."""
+    info = {'package': f'{eco}:{name}', 'eco': eco, 'name': name}
+    if eco == 'npm':
+        data, err = get_json('https://api.npmjs.org/downloads/point/last-month/' + urllib.parse.quote(name, safe='@/'))
+        n = data.get('downloads') if isinstance(data, dict) else None
+        if err or not isinstance(n, int): return None, f'could not read npm download numbers ({clean(err or "no data", 60)}). Not trusted.'
+        info['downloads'] = n
+        if n < NPM_MIN_DOWNLOADS: return None, f'only {n:,} npm downloads last month, needs {NPM_MIN_DOWNLOADS:,}'
+        meta, _ = get_json('https://registry.npmjs.org/' + urllib.parse.quote(name, safe='@/') + '/latest')
+        r = meta.get('repository') if isinstance(meta, dict) else None
+        url = r.get('url') if isinstance(r, dict) else r
+        if url and not repo_in_url(url, repo): return None, f'the npm package points to {clean(url, 60)}, not {repo}'
+        info['repo_checked'] = bool(url)
+    else:
+        data, err = get_json('https://pypi.org/pypi/' + urllib.parse.quote(name) + '/json')
+        i = data.get('info') if isinstance(data, dict) else None
+        if err or not isinstance(i, dict): return None, f'could not read the PyPI entry ({clean(err or "no data", 60)}). Not trusted.'
+        links = list((i.get('project_urls') or {}).values()) + [i.get('home_page')]
+        if not any(repo_in_url(u, repo) for u in links): return None, f'the PyPI entry does not point to {repo}'
+        info['version'] = clean(i.get('version'), 30); info['repo_checked'] = True
+    return info, None
 
 # ---------- pick, install, cleanup ----------
 def skill_dirs(vendor):

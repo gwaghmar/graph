@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed (third end-to-end findings)
+- Checkpoint: `--serve --background` starts the page detached, writes pid and port to `checkpoint.json`, and prints the link with its token at once. `--wait` and `--stop` added. The browser opens only with `--open`. GO records the request User-Agent class and the summary says "pressed GO from a browser" or "from a script (not proof of a human)". The honest limit is documented: the runtime cannot prove a human pressed GO.
+- SKILL.md: on a large job run find for every part and scan the top picks before asking anything, then show the checkpoint (link or multi-select) and end the turn.
+- Huge repos: new pick kind `package` (`--package npm:<name>` or `pip:<name>`), trusted from npm download counts or the PyPI entry plus GitHub stars, shown as "package: installed by npm, not scanned". A repo over the clone limit gets a sparse partial clone of its skill folders (`scan --path` names one), else "too big: reference only".
+- Scanner: URLs in LICENSE, COPYING and NOTICE and markdown links in plain docs are not network use. Secret-path plus URL, injection phrases, hidden comments and hidden characters BLOCK only in agent files (SKILL.md, AGENTS.md, CLAUDE.md, `*.mdc`, `prompts/`, `commands/`, `agents/`) and code. In other docs they WARN.
+- `graph-skill install --help`, `-h` and `help` print help and never install.
+- Usage ledger reads every host session of the project in the run window (also sessions started in a sub folder or worktree, checked by each line's cwd), with their subagent files, de-duplicated by message id. The report says how many sessions it counted.
+
 ### Added (human checkpoint, sizes, short loud output)
 - `checkpoint --run <id> [--serve] [--terminal]`: one short keep/drop screen (plan steps, top pick per part with "+2 more", safety badge, researched features, cost, security) and one GO. `--serve` uses a local page with a one-time token (403 on a wrong one, 30 minute timeout); `--terminal` reads `go` or `drop 2,4` and honours `NO_COLOR`. GO records approval as "pressed GO" with the drops, removes dropped pending steps and picks, and refuses if a kept step needs a dropped one.
 - `init --size small|medium|large` (required). Small needs only preflight and approve. Medium keeps the current gates and gates only `parts --main` parts. Large gates every part and the checkpoint. `size --to` changes it (logged, gates re-checked). `feature` adds a researched feature to the checkpoint.

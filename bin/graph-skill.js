@@ -279,6 +279,8 @@ function help() {
 
 function main(argv) {
   const command = argv[0] || 'help';
+  // Help never installs: any help word or flag anywhere shows help first.
+  if (command === 'help' || argv.some((x) => x === '--help' || x === '-h' || x === 'help')) { help(); return; }
   const flags = { global: argv.includes('--global'), enable: argv.includes('--enable'), yes: argv.includes('--yes') };
   const si = argv.indexOf('--script');
   if (si !== -1) {

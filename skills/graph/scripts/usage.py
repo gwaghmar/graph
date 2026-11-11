@@ -96,11 +96,29 @@ def claude_dirs(home, cwd, project=None):
         if d.is_dir() and d not in out: out.append(d)
     return out
 
+def claude_sub_dirs(home, cwd, project=None):
+    """Project folders for sessions started in a sub folder or worktree of the project. Only a guess from the name:
+    each record's own cwd is checked before it counts, so a sibling folder with a similar name never leaks in."""
+    base, out = home / '.claude' / 'projects', []
+    if not base.is_dir(): return out
+    exact = {d.name for d in claude_dirs(home, cwd, project)}
+    for r in [preflight.project_root(cwd, None, project), Path(cwd)]:
+        enc = re.sub(r'[^A-Za-z0-9]', '-', str(r)) + '-'
+        for d in sorted(base.iterdir()):
+            if d.is_dir() and d.name.startswith(enc) and d.name not in exact and d not in out: out.append(d)
+    return out
+
 def collect_claude(home, cwd, t0, t1, session=None, project=None):
+    """Every session file of the project that touches the run window, plus each session's subagent files.
+    A headless call is its own session, so a run with many calls has many files. With session=None all of them count.
+    Records are de-duplicated by message id, so a resumed session that copies old messages does not count twice."""
     best = {}
-    for base in claude_dirs(home, cwd, project):
+    roots = [preflight.project_root(cwd, None, project), Path(cwd)]
+    subs = claude_sub_dirs(home, cwd, project)
+    for base in claude_dirs(home, cwd, project) + subs:
         files = [(f, None) for f in base.glob('*.jsonl')] + [(f, f.stem[6:]) for f in base.glob('*/subagents/agent-*.jsonl')]
-        for f, fid in files:
+        for f, fid in sorted(files, key=lambda x: str(x[0])):
+            sid_file = f.parent.parent.name if fid else f.stem
             try:
                 if f.stat().st_mtime < t0 - 5: continue
                 lines = f.read_text(encoding='utf-8', errors='replace').splitlines()
@@ -113,11 +131,12 @@ def collect_claude(home, cwd, t0, t1, session=None, project=None):
                 u = m.get('usage') if isinstance(m, dict) else None
                 if not isinstance(u, dict) or o.get('type') != 'assistant': continue
                 if session and o.get('sessionId') != session: continue
+                if base in subs and not (o.get('cwd') and any(same_dir(o['cwd'], r) for r in roots)): continue
                 ts = epoch_of(o.get('timestamp'))
                 model = m.get('model')
                 if ts is None or model in (None, '<synthetic>'): continue
                 det = u.get('output_tokens_details') if isinstance(u.get('output_tokens_details'), dict) else {}
-                rec = {'model': str(model), 'ts': ts, 'agent': fid or (o.get('agentId') if o.get('isSidechain') else None),
+                rec = {'model': str(model), 'ts': ts, 'session': str(o.get('sessionId') or sid_file), 'agent': fid or (o.get('agentId') if o.get('isSidechain') else None),
                        'input': num(u.get('input_tokens')), 'output': num(u.get('output_tokens')), 'cache_read': num(u.get('cache_read_input_tokens')),
                        'cache_write': num(u.get('cache_creation_input_tokens')), 'reasoning': num(det.get('thinking_tokens')),
                        'cache_write_1h': num((u.get('cache_creation') or {}).get('ephemeral_1h_input_tokens') if isinstance(u.get('cache_creation'), dict) else 0)}
@@ -232,7 +251,8 @@ def collect(d, home, cwd, host=None, session=None, project=None, today=None, now
             out['note'] = f'Usage is not read for host "{h}". Tokens are unknown.'; return out
         table, as_of, where, age = load_prices(home, today)
         rows, agents = build(recs, d, table, now)
-        out.update(status='ok', rows=rows, agents=agents, totals=sums(rows), prices={'as_of': as_of, 'from': where, 'age_days': age}, records=len(recs))
+        out.update(status='ok', rows=rows, agents=agents, totals=sums(rows), prices={'as_of': as_of, 'from': where, 'age_days': age}, records=len(recs),
+                   sessions=len({r['session'] for r in recs if r.get('session')}))
         if not recs: out['note'] = 'No usage lines were found for this project in the run window.'
     except Exception as e: out['note'] = f'Usage could not be read ({type(e).__name__}).'
     return out
@@ -263,6 +283,7 @@ def report_lines(u):
     age = p.get('age_days')
     L = [LABEL, '', f"Prices as of {p.get('as_of', 'unknown')} ({p.get('from', '?')}" + (f', {age} days old' if age is not None else '') + ').']
     if u.get('note'): L.append(u['note'])
+    if (u.get('sessions') or 0) > 1: L.append(f"Counted {u['sessions']} host sessions that overlap this run (each headless call is its own session).")
     rows = u.get('rows') or []
     if rows:
         L += ['', *table_lines('Node', group(rows, 'who')), '', *table_lines('Model', group(rows, 'model'))]

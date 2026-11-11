@@ -138,3 +138,16 @@ test('doctor runs and reports hosts', () => {
   assert.equal(r.status, 0);
   assert.match(r.stdout, /Hosts detected: claude/);
 });
+
+test('install --help, -h and help print help and never install', () => {
+  for (const args of [['install', '--help'], ['install', '-h'], ['install', 'help'], ['help'], ['--help'], ['-h'], ['install', '--global', '--help'], ['update', '-h'], ['uninstall', '--help']]) {
+    const c = setup();
+    const r = run(c, args, 'claude');
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /Usage:/);
+    assert.doesNotMatch(r.stdout, /Installed Graph/);
+    assert.equal(exists(c.proj, '.claude'), false, args.join(' '));
+    assert.equal(exists(c.proj, '.agents'), false, args.join(' '));
+    assert.equal(exists(c.home, '.claude'), false, args.join(' '));
+  }
+});

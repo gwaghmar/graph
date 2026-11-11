@@ -4,7 +4,7 @@
 This module only builds and shows items. It never changes run state. graph.py applies the answer.
 Everything shown is plain text from the run state. Fetched text is cleaned first. No network loads in the page."""
 from __future__ import annotations
-import html, json, os, re, sys
+import html, json, os, re, socket, sys, time
 from pathlib import Path
 
 import outside
@@ -31,7 +31,11 @@ def scan_book(run_dir):
     try: return json.loads((Path(run_dir) / 'scan.json').read_text(encoding='utf-8'))
     except (OSError, ValueError): return {}
 
-def safety_of(verdict):
+def safety_of(verdict, res=None):
+    if verdict == 'package':
+        eco = str((res or {}).get('package') or 'npm').split(':')[0]
+        return (f"package: installed by {eco}, not scanned", 'warn')
+    if verdict == 'big': return ('too big: reference only', 'warn')
     return {'clean': ('safe', 'ok'), 'warn': ('warnings', 'warn'), 'block': ('blocked', 'bad')}.get(verdict, ('not scanned', 'warn'))
 
 def build_items(d, run_dir):
@@ -53,7 +57,7 @@ def build_items(d, run_dir):
         if not repo: continue
         c = next((x for x in top if x.get('repo') == repo), {})
         res = book.get(repo) or {}
-        badge = safety_of(res.get('verdict') or (pk or {}).get('verdict'))
+        badge = safety_of(res.get('verdict') or (pk or {}).get('verdict'), res or pk)
         ment = outside.total_mentions(c) if c else 0
         bits = [f'{ment} mentions' if ment else '', f"{c['stars']} stars" if c.get('stars') else '']
         items.append({'id': 'pick:' + part, 'kind': 'pick', 'part': clean(part, 30), 'title': clean(repo, 50),
@@ -72,7 +76,8 @@ def security_line(d, run_dir):
     book = scan_book(run_dir); picks = (d.get('outside') or {}).get('picks', [])
     if not picks: return 'No outside code used.'
     v = [(book.get(p['use']) or {}).get('verdict') or p.get('verdict') for p in picks]
-    return f"{len(picks)} outside pick(s) scanned: {v.count('clean')} safe, {v.count('warn')} with warnings, {v.count('block')} blocked. Nothing was run."
+    extra = (f", {v.count('package')} package(s) installed by npm or pip, not scanned" if v.count('package') else '') + (f", {v.count('big')} too big, reference only" if v.count('big') else '')
+    return f"{len(picks)} outside pick(s): {v.count('clean')} safe, {v.count('warn')} with warnings, {v.count('block')} blocked{extra}. Nothing was run."
 
 def hidden_count(d, run_dir):
     return sum((outside.load_doc(Path(run_dir), p) or {}).get('hidden', 0) for p in (d.get('outside') or {}).get('parts', []))
@@ -168,3 +173,48 @@ def render_html(m, token=None):
 {''.join(cards) or '<p class="ex">No items yet.</p>'}
 <div class="money"><span>Cost to test</span><b>{e(m['cost'])}</b></div><div class="sec"><span>Security</span><span>{e(m['security'])}</span></div>{hid}
 <button class="go" id="go" type="button">GO ▶</button><p class="msg" id="msg" role="alert" hidden></p></main><script>{js}</script></body></html>"""
+
+
+# ---------- background server state: .graph/runs/<id>/checkpoint.json ----------
+BROWSER_UA = re.compile(r'^Mozilla/\d.*\b(Chrome|Chromium|Safari|Firefox|Edg|OPR|Gecko)\b', re.I)
+
+def ua_class(ua):
+    """'browser' for a browser-looking User-Agent, else 'script' (curl, python, empty). A script can fake this header,
+    so it is evidence only. It is not proof that a human pressed GO."""
+    return 'browser' if BROWSER_UA.search(str(ua or '')) else 'script'
+
+def pressed_text(cls):
+    if cls == 'browser': return 'pressed GO from a browser'
+    if cls == 'script': return 'pressed GO from a script (not proof of a human)'
+    return 'pressed GO in the terminal'
+
+def state_path(run_dir): return Path(run_dir) / 'checkpoint.json'
+
+def read_state(run_dir):
+    try:
+        d = json.loads(state_path(run_dir).read_text(encoding='utf-8'))
+        return d if isinstance(d, dict) else None
+    except (OSError, ValueError): return None
+
+def write_state(run_dir, **fields):
+    """Merge fields into checkpoint.json (mode 0600: it holds the one-time link)."""
+    p = state_path(run_dir); cur = read_state(run_dir) or {}
+    cur.update(fields)
+    tmp = p.with_suffix('.tmp')
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w', encoding='utf-8') as fh: fh.write(json.dumps(cur) + '\n')
+    os.replace(tmp, p)
+
+def port_open(port):
+    """True if something listens on 127.0.0.1:port. Portable: no signals, so no risk of killing a reused pid."""
+    try:
+        with socket.create_connection(('127.0.0.1', int(port)), timeout=1): return True
+    except (OSError, ValueError, TypeError): return False
+
+def live_state(run_dir):
+    """The saved state, with 'waiting' turned into 'dead' if the server is gone."""
+    st = read_state(run_dir)
+    if st and st.get('status') == 'waiting':
+        if time.time() > (st.get('expires') or 0): st['status'] = 'timeout'
+        elif not port_open(st.get('port')): st['status'] = 'dead'
+    return st
