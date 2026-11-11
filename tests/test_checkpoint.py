@@ -1,3 +1,4 @@
+import os; os.environ.setdefault("GRAPH_SKILL_NO_PROBES", "1")  # never call real CLIs (vercel whoami opens browser sign-in)
 import json, os, subprocess, sys, unittest, urllib.error, urllib.request
 from pathlib import Path
 

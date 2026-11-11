@@ -1,3 +1,4 @@
+import os; os.environ.setdefault("GRAPH_SKILL_NO_PROBES", "1")  # never call real CLIs (vercel whoami opens browser sign-in)
 import json, os, re, subprocess, sys, tempfile, time, unittest
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent)); import briefhelp  # noqa: E402

@@ -300,9 +300,9 @@ SHELL_LINE = re.compile(r'^\s*(\$\s|sudo\s|rm\s|chmod\s|bash\s|sh\s|zsh\s|python
 COMMENT = re.compile(r'<!--(.*?)-->', re.S)
 COMMENT_BAD = re.compile(r'\b(ignore|instructions?|you must|you should|assistant|system prompt|do not tell|run|execute|curl|wget|send|secret|token|password|always|never)\b', I)
 HIDDEN_CH = re.compile(r'[​-‏‪-‮⁠-⁤﻿]|[\U000e0000-\U000e007f]')
-AGENT_FILES = {'skill.md', 'agents.md', 'claude.md'}
+AGENT_FILES = {'skill.md', 'agents.md', 'agent.md', 'claude.md', 'claude.local.md', 'gem' + 'ini.md', '.cursorrules', '.windsurfrules', 'copilot-instructions.md'}
 AGENT_DIRS = {'prompts', 'commands', 'agents'}
-LEGAL_FILE = re.compile(r'^(licen[sc]e|copying|notice|copyright|unlicense)([._-][a-z0-9._-]*)?$', I)
+LEGAL_FILE = re.compile(r'^(licen[sc]e|copying|notice|copyright|unlicense)([-_][a-z0-9_-]*)?(\.(txt|md))?$', I)  # any other extension (license.js) is code
 MD_LINK = re.compile(r'\[[^\]\n]*\]\(\s*<?https?://[^)\n]*\)|^\s*\[[^\]\n]+\]:\s*<?https?://\S+|<https?://[^>\s]+>')
 LIFECYCLE = ('preinstall', 'install', 'postinstall', 'prepare', 'prepack', 'prepublish', 'prepublishOnly')
 
@@ -324,9 +324,19 @@ def scan_frontmatter(F, rel, text):
                 else: break
             if '*' in val or re.search(r'\bBash\b(?!\s*\()', val): add(F, 'block', 'SKILL.md frontmatter allows tools with a wildcard', rel, i + 2)
 
-def is_agent_file(rel):
+def in_skill_folder(root, path):
+    """True if the file sits in or under a folder (up to the scan root) that holds a SKILL.md. The agent loads those files."""
+    d = Path(path).parent; root = Path(root)
+    while True:
+        with contextlib.suppress(OSError):
+            if any(x.name.lower() == 'skill.md' for x in d.iterdir()): return True
+        if d == root or d == d.parent: return False
+        d = d.parent
+
+def is_agent_file(rel, root=None, path=None):
     parts = rel.lower().split('/')
-    return parts[-1] in AGENT_FILES or parts[-1].endswith('.mdc') or any(x in AGENT_DIRS for x in parts[:-1])
+    if parts[-1] in AGENT_FILES or parts[-1].endswith('.mdc') or any(x in AGENT_DIRS for x in parts[:-1]): return True
+    return bool(root and path and parts[-1].endswith(('.md', '.txt')) and in_skill_folder(root, path))
 
 def scan_file(F, root, path):
     rel = path.relative_to(root).as_posix()
@@ -350,17 +360,17 @@ def scan_file(F, root, path):
     if name == 'setup.py': add(F, 'warn', 'setup.py runs code on install', rel)
     if name == 'pyproject.toml' and re.search(r'cmdclass|build-backend\s*=\s*["\'](?!setuptools|hatchling|flit|poetry|pdm)', text): add(F, 'warn', 'pyproject build hook', rel)
     legal = bool(LEGAL_FILE.match(name))
-    agent = is_agent_file(rel)
+    agent = is_agent_file(rel, root, path)
     is_code = ext not in DOC_EXT and not legal
-    strict = 'block' if (agent or is_code) else 'warn'  # in plain docs the strict rules are a warning, not a block
+    strict = 'block' if (agent or is_code) else 'warn'  # a bare injection phrase in plain docs is a warning. Hidden text and exfil stay BLOCK everywhere
     if ext in DOC_EXT or name == 'skill.md' or legal:
         for rx in INJECT:
             m = rx.search(text)
             if m: add(F, strict, 'prompt-injection phrase', rel, line_of(text, m.start())); break
         for m in COMMENT.finditer(text):
-            if COMMENT_BAD.search(m.group(1)): add(F, strict, 'hidden html comment with instructions', rel, line_of(text, m.start())); break
+            if COMMENT_BAD.search(m.group(1)): add(F, 'block', 'hidden html comment with instructions', rel, line_of(text, m.start())); break
         m = HIDDEN_CH.search(text)
-        if m and (ext in ('.md', '.mdc', '.txt') or legal): add(F, strict, 'hidden unicode characters in text', rel, line_of(text, m.start()))
+        if m and (ext in ('.md', '.mdc', '.txt') or legal): add(F, 'block', 'hidden unicode characters in text', rel, line_of(text, m.start()))
     is_prose = ext in ('.md', '.mdc', '.txt') or name == 'skill.md' or legal
     seen, has_secret, has_net = set(), None, False
     prose_rules = [r for r in CODE_RULES if r[1] == 'pipes a download into a shell']  # secret places in prose are judged per file below
@@ -378,7 +388,7 @@ def scan_file(F, root, path):
             if rule not in seen and rx.search(ln): seen.add(rule); add(F, level, rule, rel, i)
         if name == 'skill.md' and 'skill-run' not in seen and SHELL_LINE.search(ln): seen.add('skill-run'); add(F, 'warn', 'SKILL.md has a shell command', rel, i)
         if name == 'skill.md' and 'skill-url' not in seen and NET_TOK.search(ln): seen.add('skill-url'); add(F, 'warn', 'SKILL.md has a URL or network command', rel, i)
-    if has_secret and has_net: add(F, strict, 'names a secret place and uses the network in one file', rel, has_secret)
+    if has_secret and has_net: add(F, 'block', 'names a secret place and uses the network in one file', rel, has_secret)
     elif has_secret and (is_code or is_prose) and 'reads a secret place (ssh, cloud, keychain, browser)' not in seen: add(F, 'warn', 'names a secret place', rel, has_secret)
 
 def scan_tree(root):
@@ -452,7 +462,7 @@ def sparse_skill_dirs(dest, only=None):
     dirs = []
     for ln in out.splitlines():
         parts = ln.split('/')
-        if parts[-1] == 'SKILL.md' and len(parts) - 1 <= 3 and all(re.match(r'^[A-Za-z0-9_. -]{1,80}$', x) and x not in ('.', '..') for x in parts[:-1]):
+        if parts[-1] == 'SKILL.md' and len(parts) - 1 <= 3 and all(re.match(r'^[A-Za-z0-9_. -]{1,80}$', x) and x not in ('.', '..') and not x.startswith('-') for x in parts[:-1]):
             dirs.append('/'.join(parts[:-1]))
     return sorted(set(dirs))[:10]
 
@@ -505,7 +515,7 @@ def do_scan(repo, run=None, path=None):
     dirs = sparse_skill_dirs(dest, sub)
     if not dirs:
         rmtree(dest); return big_result(repo, f'{reason}, no skill folder found'), None
-    _, err = git(['sparse-checkout', 'set', '--cone', *dirs], cwd=dest)
+    _, err = git(['sparse-checkout', 'set', '--cone', '--', *dirs], cwd=dest)
     if err:
         rmtree(dest); return big_result(repo, f'{reason}, partial fetch failed'), None
     if tree_size(dest) > CLONE_MAX:
@@ -556,11 +566,12 @@ def check_package(eco, name, repo):
         if err or not isinstance(n, int): return None, f'could not read npm download numbers ({clean(err or "no data", 60)}). Not trusted.'
         info['downloads'] = n
         if n < NPM_MIN_DOWNLOADS: return None, f'only {n:,} npm downloads last month, needs {NPM_MIN_DOWNLOADS:,}'
-        meta, _ = get_json('https://registry.npmjs.org/' + urllib.parse.quote(name, safe='@/') + '/latest')
+        meta, _err = get_json('https://registry.npmjs.org/' + urllib.parse.quote(name, safe='@/') + '/latest')
         r = meta.get('repository') if isinstance(meta, dict) else None
         url = r.get('url') if isinstance(r, dict) else r
-        if url and not repo_in_url(url, repo): return None, f'the npm package points to {clean(url, 60)}, not {repo}'
-        info['repo_checked'] = bool(url)
+        if not url: return None, 'the npm registry data could not be read or names no repository. Not trusted.'
+        if not repo_in_url(url, repo): return None, f'the npm package points to {clean(url, 60)}, not {repo}'
+        info['repo_checked'] = True
     else:
         data, err = get_json('https://pypi.org/pypi/' + urllib.parse.quote(name) + '/json')
         i = data.get('info') if isinstance(data, dict) else None

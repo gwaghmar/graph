@@ -4,6 +4,13 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed (review findings for growth and research mode)
+- Posting is now claim then confirm. `grow post --claim` runs every gate before anything goes out and returns a one-time token. `--confirm <token>` records the post and is refused for a wrong or stale token or an edited draft. Duplicate check no longer swallowed (and uses stored text hashes), disclosure must be the channel's own words, caps, gaps and duplicates use one project ledger, failed claims count toward the gap.
+- Checkpoint: GO approves only the card ids the page showed. Cards show the full draft text and its current hash. Only displayed cards are marked shown. The GO evidence class is stored on the item. A terminal GO for posts needs a TTY. The link is not printed when posts wait. Windows `os.replace` retry, and the server stops even if the state write fails.
+- Growth: future-dated readings refused, a decision needs a reading from after the window end that is not the baseline (latest unless a reason is logged), "did not move" is reported when the value is the same, and a channel change that loosens a rule needs the user's words.
+- Scanner regressions: a legal-file name with a code extension is code. Any `.md` or `.txt` in a skill folder, plus GEMINI.md, AGENT.md, CLAUDE.local.md, `.cursorrules`, `.windsurfrules` and `copilot-instructions.md`, is an agent file. Secret plus network, hidden comments and hidden characters BLOCK in all prose again; only a bare injection phrase in plain docs WARNs. npm packages fail closed without a repository link and cannot be used for a BLOCKed repo. Sparse clone folders cannot start with `-`.
+- Research: source links are compared in canonical form (scheme, www, tracking params, query order).
+
 ### Added (field brief and research mode)
 - `brief --run <id> --field ...`: a short field brief the model writes from today's sources (no per-field code or lists). Required before approve on medium and large runs. One locked card on the checkpoint.
 - `source`: date checked against the brief's window per source type with the runtime's own clock. Undated and too old are refused. Landmarks need `--landmark --why` and a brief with landmark-ok yes, and are labeled.
@@ -23,7 +30,7 @@ All notable changes to this project are documented here.
 - Checkpoint: `--serve --background` starts the page detached, writes pid and port to `checkpoint.json`, and prints the link with its token at once. `--wait` and `--stop` added. The browser opens only with `--open`. GO records the request User-Agent class and the summary says "pressed GO from a browser" or "from a script (not proof of a human)". The honest limit is documented: the runtime cannot prove a human pressed GO.
 - SKILL.md: on a large job run find for every part and scan the top picks before asking anything, then show the checkpoint (link or multi-select) and end the turn.
 - Huge repos: new pick kind `package` (`--package npm:<name>` or `pip:<name>`), trusted from npm download counts or the PyPI entry plus GitHub stars, shown as "package: installed by npm, not scanned". A repo over the clone limit gets a sparse partial clone of its skill folders (`scan --path` names one), else "too big: reference only".
-- Scanner: URLs in LICENSE, COPYING and NOTICE and markdown links in plain docs are not network use. Secret-path plus URL, injection phrases, hidden comments and hidden characters BLOCK only in agent files (SKILL.md, AGENTS.md, CLAUDE.md, `*.mdc`, `prompts/`, `commands/`, `agents/`) and code. In other docs they WARN.
+- Scanner: URLs in LICENSE, COPYING and NOTICE and markdown links in plain docs are not network use. Injection phrases BLOCK in agent files and code and WARN in plain docs (secret plus network, hidden comments and hidden characters BLOCK everywhere again, see the review fixes above).
 - `graph-skill install --help`, `-h` and `help` print help and never install.
 - Usage ledger reads every host session of the project in the run window (also sessions started in a sub folder or worktree, checked by each line's cwd), with their subagent files, de-duplicated by message id. The report says how many sessions it counted.
 

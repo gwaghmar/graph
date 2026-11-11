@@ -1,3 +1,4 @@
+import os; os.environ.setdefault("GRAPH_SKILL_NO_PROBES", "1")  # never call real CLIs (vercel whoami opens browser sign-in)
 import json, subprocess, sys, time, unittest
 from pathlib import Path
 
@@ -219,7 +220,7 @@ class Defer(BudgetBase):
         self.g('node', 'r1', 'a', '--role', 'research', '--status', 'running'); self.g('node', 'r1', 'a', '--role', 'research', '--status', 'complete')
         r = self.g('node', 'r1', 'b', '--role', 'research', '--status', 'running', code=3)
         self.assertIn(hm(self.later), r.stderr); self.assertIn('level 2', r.stderr)
-        self.assertIn(f'b  (waiting until {hm(self.later)})', self.g('next', 'r1').stdout)
+        self.assertRegex(self.g('next', 'r1').stdout, r'b  \(waiting until (\d{4}-\d\d-\d\d )?' + hm(self.later) + r'\)')
         self.assertIn('"outcome": "refused"', self.log()); self.assertIn('"cmd": "defer"', self.log())
 
     def test_deferral_ends_at_the_time(self):
@@ -298,7 +299,7 @@ class Statusline(unittest.TestCase):
         self.assertEqual(statusline.status_line(data), 'Fake A | 5h 42% | 7d 9%')
 
     def run_script(self, home, stdin, *args):
-        env = {'HOME': str(home), 'USERPROFILE': str(home), 'PATH': ''}
+        env = {'HOME': str(home), 'USERPROFILE': str(home), 'PATH': '', 'GRAPH_SKILL_NO_PROBES': '1'}
         import os
         env['PATH'] = os.environ.get('PATH', '')
         return subprocess.run([sys.executable, str(CORE / 'statusline.py'), *args], input=stdin, capture_output=True, text=True, encoding='utf-8', env=env)

@@ -1385,6 +1385,7 @@ def cmd_pick(a):
     if a.kind == 'package':
         try: eco, pname = outside.parse_package(a.package)
         except ValueError as e: die(2, str(e))
+        if (scan_book(a.run).get(repo) or {}).get('verdict') == 'block': die(3, f'Refused: the scan of {repo} says BLOCK. A package pick cannot get around that.')
         info, err = outside.check_package(eco, pname, repo)
         if err: die(3, f'Refused: package {eco}:{pname} is not trusted: {err}.')
         book = scan_book(a.run); book[repo] = {'repo': repo, 'verdict': 'package', 'files': 0, 'findings': [], 'part': a.part, 'stars': c.get('stars'), **info, 'at': now()}
@@ -1497,11 +1498,11 @@ def log_refusal(run, msg, cmd='checkpoint'):
     with contextlib.suppress(Exception):
         append_log(run, {'at': now(), 'cmd': cmd, 'node': None, 'args': {}, 'outcome': 'refused', 'exit_code': 3, 'message': clip(msg)})
 
-def apply_checkpoint(run, dropped, source='checkpoint', evidence=None):
+def apply_checkpoint(run, dropped, source='checkpoint', evidence=None, shown=None):
     """Record the user's keep/drop answer. Under the run lock. Refuses (exit 3) with a clear message; nothing is saved then."""
     with run_lock(run):
         p, d = load(run)
-        items = checkpoint.build_items(d, ROOT / run)
+        items = checkpoint.build_items(d, ROOT / run, mark=False)  # a GO must not mark anything shown
         valid = {i['id']: i for i in items}
         dropped = list(dict.fromkeys(dropped))
         if 'brief' in dropped: die(3, 'Refused: the field brief cannot be dropped. It is the rule set for this run.')
@@ -1524,8 +1525,9 @@ def apply_checkpoint(run, dropped, source='checkpoint', evidence=None):
         d['checkpoint_built'] = True
         approval_checks(d, run)
         qcards = [x for x in valid if x.startswith('queue:')]
+        seen = set(shown or [])  # only the cards the page really showed can be approved. A card that was not on the page is left alone
         if qcards:
-            try: growth.checkpoint_apply(d.get('campaign'), [x for x in qcards if x not in dropped], [x for x in qcards if x in dropped])
+            try: growth.checkpoint_apply(d.get('campaign'), [x for x in qcards if x not in dropped and x in seen], [x for x in qcards if x in dropped], evidence=(evidence or {}).get('pressed_from'))
             except growth.Refuse as e: die(3, e.text())
         names = [valid[x]['title'] for x in dropped]
         note = 'pressed GO' + (f" (dropped: {', '.join(names)})" if names else ' (kept everything)')
@@ -1572,29 +1574,31 @@ def serve_checkpoint(run, timeout, open_browser, quiet=False):
                 if not 0 <= n <= 65536: raise ValueError
                 body = json.loads(self.rfile.read(n) or b'{}')
                 if not isinstance(body, dict): raise ValueError
-                drops = body.get('dropped', [])
-                if not isinstance(drops, list) or not all(isinstance(x, str) for x in drops): raise ValueError
+                drops = body.get('dropped', []); shown = body.get('shown', [])
+                if not isinstance(drops, list) or not all(isinstance(x, str) for x in drops) or not isinstance(shown, list) or not all(isinstance(x, str) for x in shown): raise ValueError
             except (ValueError, TypeError):
                 return self._send(400, json.dumps({'error': 'Bad request.'}))
             cls = checkpoint.ua_class(self.headers.get('User-Agent'))  # class only: the header text is not stored
-            try: apply_checkpoint(run, drops, evidence={'pressed_from': cls})
+            try: apply_checkpoint(run, drops, evidence={'pressed_from': cls}, shown=shown)
             except SystemExit:
                 msg = CTX['msg'] or 'Refused.'; log_refusal(run, msg); return self._send(409, json.dumps({'error': msg}))
             with contextlib.suppress(Exception):
                 append_log(run, {'at': now(), 'cmd': 'checkpoint', 'node': None, 'args': {'pressed_from': cls}, 'outcome': 'ok', 'exit_code': 0, 'message': checkpoint.pressed_text(cls)})
-            checkpoint.write_state(rd, status='approved', pressed_from=cls, drops=drops, done_at=now())
-            state['done'] = True; state['ok'] = drops; self._send(200, json.dumps({'ok': True}))
+            state['done'] = True; state['ok'] = drops  # set first: the approval is recorded, so the server must stop even if the state write fails
+            try: checkpoint.write_state(rd, status='approved', pressed_from=cls, drops=drops, done_at=now())
+            finally: self._send(200, json.dumps({'ok': True}))
     srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), H); srv.timeout = 0.5; srv.daemon_threads = True
     url = f'http://127.0.0.1:{srv.server_port}/?t={token}'
     end = epoch() + timeout
     checkpoint.write_state(rd, status='waiting', pid=os.getpid(), port=srv.server_port, url=url, started=now(), expires=end, pressed_from=None, drops=None)
     # The human needs the link, so it is printed. Anyone who can read this output can press GO: the runtime cannot prove a human did.
-    if not quiet: print(f'Open this page: {url}', flush=True)
-    if open_browser:  # only when the user asked with --open
+    queue_wait = bool(load(run)[1].get('campaign') and growth.has_open(load(run)[1]['campaign']))
+    if not quiet and not queue_wait: print(f'Open this page: {url}', flush=True)
+    if open_browser or queue_wait:  # only when the user asked with --open
         opened = False
         with contextlib.suppress(Exception):
-            import webbrowser; opened = bool(webbrowser.open(url))
-        if not opened and not quiet: print('The browser did not open. Use the link above, or `checkpoint --terminal`.', flush=True)
+            import webbrowser; opened = os.environ.get('GRAPH_SKILL_NO_PROBES') != '1' and bool(webbrowser.open(url))
+        if not opened and not quiet: print('The browser did not open. Ask the user to run `checkpoint --terminal` in their own terminal.' if queue_wait else 'The browser did not open. Use the link above, or `checkpoint --terminal`.', flush=True)
     try:
         while not state['done'] and not state['stop'] and epoch() < end: srv.handle_request()
     finally: srv.server_close()
@@ -1605,11 +1609,13 @@ def cp_start_background(run, timeout, open_browser):
     """Start the page server detached. It outlives this command. Print the link at once."""
     import subprocess
     rd = ROOT / run
+    camp = load(run)[1].get('campaign')
+    queue_wait = bool(camp and growth.has_open(camp))  # posts wait: the link goes to the user's browser, not to the model's output
     st = checkpoint.live_state(rd)
     if not (st and st.get('status') == 'waiting'):
         with contextlib.suppress(OSError): checkpoint.state_path(rd).unlink()
         cmd = [sys.executable, str(Path(__file__).resolve()), 'checkpoint', '--run', run, '--serve', '--serve-child', '--timeout', str(timeout)]
-        if open_browser: cmd.append('--open')
+        if open_browser or queue_wait: cmd.append('--open')
         kw = {'stdin': subprocess.DEVNULL, 'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL, 'close_fds': True, 'cwd': os.getcwd()}
         if os.name == 'nt': kw['creationflags'] = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
         else: kw['start_new_session'] = True
@@ -1625,7 +1631,8 @@ def cp_start_background(run, timeout, open_browser):
         if open_browser: print('Opening the page in your browser (you asked for --open).')
     c = graph_cmd()
     print('✔ CHECKPOINT READY')
-    print(f"👉 Do this:\n  1. Give the user this link. It opens on this computer only: {st['url']}\n  2. End your turn, or run: {c} checkpoint --run {run} --wait\n  3. To close it: {c} checkpoint --run {run} --stop")
+    link = 'The page opened in the user\'s browser. The link is not shown here because posts wait on it. If it did not open, ask the user to run checkpoint --terminal in their own terminal.' if queue_wait else f"Give the user this link. It opens on this computer only: {st['url']}"
+    print(f"👉 Do this:\n  1. {link}\n  2. End your turn, or run: {c} checkpoint --run {run} --wait\n  3. To close it: {c} checkpoint --run {run} --stop")
     print('The runtime cannot prove a human pressed GO. The summary says what it saw.')
 
 def cp_wait(run, timeout):
@@ -1678,12 +1685,14 @@ def cmd_checkpoint(a):
     if a.terminal:
         print(tilde(checkpoint.render_terminal(m)), flush=True)
         ids = [i['id'] for i in m['items']]
+        if any(x.startswith('queue:') for x in ids) and not sys.stdin.isatty():
+            die(3, 'Refused: posts can only be approved by a person at the keyboard. This terminal is not interactive.\n👉 Do this:\n  1. Open the page for the user: checkpoint --serve --background\n  2. Or ask the user to run checkpoint --terminal in their own terminal.')
         while True:
             line = sys.stdin.readline()
             if not line: die(1, 'No answer. Nothing was approved.')
             try: nums = checkpoint.parse_terminal(line, len(ids)); break
             except ValueError as e: print(str(e), flush=True)
-        _, lines = apply_checkpoint(a.run, [ids[n - 1] for n in sorted(nums)], evidence={'pressed_from': 'terminal'})
+        _, lines = apply_checkpoint(a.run, [ids[n - 1] for n in sorted(nums)], evidence={'pressed_from': 'terminal'}, shown=ids)
     elif a.serve and a.background:
         return cp_start_background(a.run, timeout, a.open)
     elif a.serve:

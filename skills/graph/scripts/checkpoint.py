@@ -38,7 +38,7 @@ def safety_of(verdict, res=None):
     if verdict == 'big': return ('too big: reference only', 'warn')
     return {'clean': ('safe', 'ok'), 'warn': ('warnings', 'warn'), 'block': ('blocked', 'bad')}.get(verdict, ('not scanned', 'warn'))
 
-def build_items(d, run_dir):
+def build_items(d, run_dir, mark=True):
     """Cards the user can drop. Each has id, kind, part, title, why, badge (text, level) and more."""
     items = []
     for n in d.get('nodes', []):
@@ -70,7 +70,7 @@ def build_items(d, run_dir):
         items.append({'id': 'brief', 'kind': 'brief', 'part': 'Field brief', 'title': t, 'why': w, 'badge': None, 'more': 0, 'locked': True})
     if d.get('campaign'):
         import growth
-        try: items += growth.checkpoint_cards(d['campaign'])
+        try: items += growth.checkpoint_cards(d['campaign'], mark)
         except growth.Refuse: pass
     return items
 
@@ -150,13 +150,14 @@ h1{font:700 34px/1.1 var(--display);margin:0}.ex{font:600 12px var(--body);lette
 
 JS = """const T=%TOKEN%;const cards=[...document.querySelectorAll('.card:not(.lock)')];
 const dropped=()=>cards.filter(c=>c.classList.contains('off')).map(c=>c.dataset.id);
+const shownIds=()=>cards.map(c=>c.dataset.id);
 cards.forEach(c=>{const flip=()=>{const off=c.classList.toggle('off');c.setAttribute('aria-checked',String(!off));c.querySelector('.tog').textContent=off?'DROP':'KEEP'};
 c.addEventListener('click',flip);c.addEventListener('keydown',e=>{if(e.key===' '||e.key==='Enter'){e.preventDefault();flip()}})});
 const go=document.getElementById('go'),msg=document.getElementById('msg');
 go.addEventListener('click',async()=>{const d=dropped();msg.className='msg';
 if(!T){msg.className='msg ok';msg.textContent='Tell your AI: GO'+(d.length?' - drop: '+d.join(', '):'');msg.hidden=false;return}
 go.disabled=true;
-try{const r=await fetch('/go?t='+encodeURIComponent(T),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dropped:d})});
+try{const r=await fetch('/go?t='+encodeURIComponent(T),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dropped:d,shown:shownIds()})});
 const j=await r.json().catch(()=>({}));
 if(r.ok){msg.className='msg ok';msg.textContent='\\u2713 Approved. Building now.'}else{msg.className='msg bad';msg.textContent=j.error||'Refused.';go.disabled=false}}
 catch(e){msg.className='msg bad';msg.textContent='Could not reach the runtime.';go.disabled=false}
@@ -222,7 +223,11 @@ def write_state(run_dir, **fields):
     tmp = p.with_suffix('.tmp')
     fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, 'w', encoding='utf-8') as fh: fh.write(json.dumps(cur) + '\n')
-    os.replace(tmp, p)
+    for i in range(8):  # Windows: a reader holding the file makes os.replace fail for a moment
+        try: os.replace(tmp, p); break
+        except PermissionError:
+            if i == 7: raise
+            time.sleep(0.05)
 
 def port_open(port):
     """True if something listens on 127.0.0.1:port. Portable: no signals, so no risk of killing a reused pid."""

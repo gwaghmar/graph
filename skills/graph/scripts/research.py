@@ -104,6 +104,18 @@ def safe_url(url):
     return SECRET_PARAM.sub(r'\1REDACTED', f'{m.group(1).lower()}://{host}{m.group(3)}')
 
 
+TRACKING = re.compile(r'^(utm_[a-z]+|fbclid|gclid|mc_cid|mc_eid|ref|ref_src|igshid|si)$', re.I)
+
+
+def canon_url(url):
+    """Same page, same key: scheme dropped, host lowercased, no www, no fragment, no trailing slash, tracking params removed, query sorted."""
+    m = re.match(r'^https?://([^/?#\s]+)([^?#\s]*)(?:\?([^#\s]*))?', (url or '').strip(), re.I)
+    if not m: return (url or '').strip().lower()
+    host = re.sub(r'^www\.', '', m.group(1).lower())
+    q = sorted(x for x in (m.group(3) or '').split('&') if x and not TRACKING.match(x.split('=', 1)[0]))
+    return host + (m.group(2) or '').rstrip('/') + ('?' + '&'.join(q) if q else '')
+
+
 def add_source(d, url, kind, date, date_source, title, landmark=False, why=None, level=None):
     b = need_brief(d); need_open(d)
     kind = (kind or '').strip().lower()
@@ -123,7 +135,7 @@ def add_source(d, url, kind, date, date_source, title, landmark=False, why=None,
         refuse(f'the brief has no window for type "{kind}".', f'Use a source type the brief lists: {", ".join(sorted(b["windows"]))}.',
                'Or start a new run with a brief that names this type.')
     if landmark and not b['landmark_ok']: refuse('the brief does not allow landmark sources.', 'Drop --landmark and use a newer source.')
-    if any(s['url'].lower().rstrip('/') == url.lower().rstrip('/') for s in r['sources']): refuse('this link is already a source.')
+    if any(canon_url(s['url']) == canon_url(url) for s in r['sources']): refuse('this link is already a source.')
     age = None
     if win != 'any':
         if not date:

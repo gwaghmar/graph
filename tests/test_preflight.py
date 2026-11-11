@@ -1,4 +1,5 @@
-import json, subprocess, sys, tempfile, unittest
+import os; os.environ.setdefault("GRAPH_SKILL_NO_PROBES", "1")  # never call real CLIs (vercel whoami opens browser sign-in)
+import json, os, subprocess, sys, tempfile, unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -22,6 +23,11 @@ class PreflightCase(unittest.TestCase):
         self.cwd = Path(self._tmp.name) / 'proj'
         self.home = Path(self._tmp.name) / 'home'
         self.cwd.mkdir(); self.home.mkdir()
+        p = mock.patch.dict(os.environ); p.start(); self.addCleanup(p.stop)
+        os.environ.pop('GRAPH_SKILL_NO_PROBES', None)   # these tests use mocks, so they may exercise probe logic
+        os.environ.pop('APPDATA', None)
+        # Safety net: a test that forgets its own mocks must still never start a real program (gh, vercel, supabase).
+        q = mock.patch('preflight.run_proc', side_effect=fake_run); q.start(); self.addCleanup(q.stop)
 
     def scan(self, **kw):
         return preflight.scan(self.cwd, self.home, kw.pop('env', {}), **kw)
@@ -38,7 +44,8 @@ class PreflightCase(unittest.TestCase):
         self.assertNotIn('accounts', res)
         self.assertNotIn('alice', (self.cwd / '.graph' / 'preflight.json').read_text(encoding='utf-8'))
         auth = [c for c in run.call_args_list if any(x in c.args[0] for x in AUTH_WORDS)]
-        self.assertTrue(auth)
+        self.assertTrue(auth)  # gh only: vercel and supabase are checked by login file, never by calling them
+        self.assertFalse([c for c in run.call_args_list if c.args[0][0] in ('vercel', 'supabase') and c.args[0][1] != '--version'])
         for c in auth:
             self.assertIs(c.kwargs['capture'], False)
 
@@ -80,8 +87,32 @@ class PreflightCase(unittest.TestCase):
         with mock.patch('preflight.shutil.which', side_effect=lambda n: '/bin/' + n), \
              mock.patch('preflight.run_proc', side_effect=run):
             res = self.scan()
+            self.assertEqual(res['access']['vercel'], 'no')   # no login file in the temp home
+            self.assertEqual(res['access']['gh'], 'ok')
+            res = self.scan(refresh=True, with_accounts=True)  # --with-accounts really calls vercel (mocked): timeout is unknown
         self.assertEqual(res['access']['vercel'], 'unknown')
-        self.assertEqual(res['access']['gh'], 'ok')
+
+    def test_vercel_supabase_use_login_files_in_given_home(self):
+        (self.home / '.supabase').mkdir(); (self.home / '.supabase' / 'access-token').write_text('x', encoding='utf-8')
+        d = self.home / '.local' / 'share' / 'com.vercel.cli'; d.mkdir(parents=True); (d / 'auth.json').write_text('{}', encoding='utf-8')
+        w, r = self.with_tools()
+        with w, r:
+            res = self.scan()
+        self.assertEqual((res['access']['vercel'], res['access']['supabase']), ('ok', 'ok'))
+
+    def test_probe_access_never_calls_vercel_without_accounts(self):
+        with mock.patch('preflight.shutil.which', side_effect=lambda n: '/bin/' + n), \
+             mock.patch('preflight.run_proc') as rp, mock.patch('subprocess.run') as sr, mock.patch('subprocess.Popen') as po:
+            for n in ('vercel', 'supabase'):
+                preflight.probe_access(n, False, self.home, {})
+        rp.assert_not_called(); sr.assert_not_called(); po.assert_not_called()
+
+    def test_kill_switch_blocks_every_probe(self):
+        os.environ['GRAPH_SKILL_NO_PROBES'] = '1'
+        with mock.patch('preflight.shutil.which', side_effect=lambda n: '/bin/' + n), mock.patch('preflight.run_proc') as rp:
+            for n in ('gh', 'vercel', 'supabase'):
+                self.assertEqual(preflight.probe_access(n, True, self.home, {}), {'status': 'unknown'})
+        rp.assert_not_called()
 
     def test_cache_and_refresh(self):
         w, r = self.with_tools()
@@ -142,7 +173,7 @@ class PreflightCase(unittest.TestCase):
     def cli(self, *args, env=None):
         import os
         return subprocess.run([sys.executable, str(CORE / 'graph.py'), 'preflight', *args], cwd=self.cwd,
-                              capture_output=True, text=True, encoding='utf-8', env=env or os.environ)
+                              capture_output=True, text=True, encoding='utf-8', env=env or dict(os.environ, GRAPH_SKILL_NO_PROBES='1'))
 
     def test_cli_unknown_need_is_reported_not_refused(self):
         r = self.cli('--needs', 'python,github')
@@ -156,7 +187,7 @@ class PreflightCase(unittest.TestCase):
 
     def test_unknown_need_logged(self):
         subprocess.run([sys.executable, str(CORE / 'graph.py'), 'init', 't', '--id', 'r1', '--skip-context', 'x', '--size', 'medium'],
-                       cwd=self.cwd, capture_output=True, text=True)
+                       cwd=self.cwd, capture_output=True, text=True, env=dict(os.environ, GRAPH_SKILL_NO_PROBES='1'))
         self.cli('--run', 'r1', '--needs', 'python')
         log = (self.cwd / '.graph/runs/r1/log.jsonl').read_text(encoding='utf-8')
         self.assertIn('"unmapped": ["python"]', log)

@@ -83,9 +83,26 @@ def parse_account(name, out, err=''):
         return lines[-1] if lines else ''
     return ''
 
-def probe_access(name, with_accounts):
-    """Exit code only. Output is discarded unless the caller asked for account names."""
+def login_files(name, home=None, env=None):
+    """Where a CLI keeps its login. Existence is checked only; the files are never opened."""
+    h, env = Path(home) if home else Path.home(), os.environ if env is None else env
+    if name == 'vercel':
+        bases = [h / 'Library' / 'Application Support', Path(env.get('XDG_DATA_HOME') or h / '.local' / 'share')]
+        if env.get('APPDATA'): bases.append(Path(env['APPDATA']))
+        return [b / 'com.vercel.cli' / 'auth.json' for b in bases] + [h / '.vercel' / 'auth.json']
+    if name == 'supabase':
+        return [h / '.supabase' / 'access-token']
+    return []
+
+def probe_access(name, with_accounts, home=None, env=None):
+    """Exit code only. Output is discarded unless the caller asked for account names.
+    vercel and supabase are checked OFFLINE by login-file presence: calling them can start a browser
+    sign-in (OAuth) prompt on every run. GRAPH_SKILL_NO_PROBES=1 turns all access calls off."""
+    if os.environ.get('GRAPH_SKILL_NO_PROBES') == '1': return {'status': 'unknown'}
     if not shutil.which(name): return {'status': 'unknown'}
+    files = login_files(name, home, env)
+    if files and not with_accounts:
+        return {'status': 'ok' if any(f.exists() for f in files) else 'no', 'method': 'login file'}
     r = run(ACCESS[name], capture=with_accounts)
     if r is None: return {'status': 'unknown'}
     d = {'status': 'ok' if r[0] == 0 else 'no'}
@@ -352,7 +369,7 @@ def scan(cwd, home, env, refresh=False, with_accounts=False):
                 futures[('verify', k)] = pool.submit(safe, fn)
         if acc is None:
             for n in ACCESS:
-                futures[('access', n)] = pool.submit(safe, lambda n=n: probe_access(n, with_accounts), {'status': 'unknown'})
+                futures[('access', n)] = pool.submit(safe, lambda n=n: probe_access(n, with_accounts, home, env), {'status': 'unknown'})
     if need_tools:
         tools['clis'] = {n: f.result() for (g, n), f in futures.items() if g == 'clis'}
         tools['verify'] = {n: f.result() for (g, n), f in futures.items() if g == 'verify'}

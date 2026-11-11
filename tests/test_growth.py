@@ -1,4 +1,5 @@
-import calendar, contextlib, io, json, os, subprocess, sys, tempfile, unittest
+import os; os.environ.setdefault("GRAPH_SKILL_NO_PROBES", "1")  # never call real CLIs (vercel whoami opens browser sign-in)
+import calendar, contextlib, io, json, os, re, subprocess, sys, tempfile, unittest
 from pathlib import Path
 from unittest import mock
 
@@ -57,9 +58,19 @@ class Base(unittest.TestCase):
         rows = [json.loads(l) for l in (self.dir / '.graph/campaigns/c1/queue.jsonl').read_text(encoding='utf-8').splitlines()]
         return [r for r in rows if r['id'] == qid][-1]
 
+    def claim(self, qid='q1', *extra, code=0):
+        out = self.g('post', qid, '--claim', *extra, code=code)
+        m = re.search(r'Token (\w+)', out); return m.group(1) if m else None
+
+    def post(self, qid='q1', result='https://x.com/me/1', *extra, claim_code=0, before=None, thread=None):
+        """Claim the slot, then confirm. claim_code is the expected exit of the claim."""
+        tok = self.claim(qid, *extra, *(['--thread', thread] if thread else []), code=claim_code)
+        if claim_code: return None
+        return self.g('post', qid, '--confirm', tok, '--result', result, *(['--before-shot', before] if before else []), *(['--thread', thread] if thread else []))
+
     def approve(self, qid='q1', words='yes, post it'):
         self.g('queue', 'show')
-        self.g('queue', 'approve', qid, '--words', words, '--hash', self.item(qid)['sha256'][:12])
+        self.g('queue', 'approve', qid, '--words', words, '--hash', growth.item_hash(self.item(qid), 'c1')[:12])
 
 
 class StateMachine(Base):
@@ -74,11 +85,18 @@ class StateMachine(Base):
         self.setup_campaign(baseline=False)
         self.g('exp', 'start', 'e1', code=3)
         self.g('exp', 'baseline', 'e1')
-        self.g('read', '--metric', 'stars', '--value', '12', '--as-of', '2026-12-01', '--source', 'user typed', '--method', 'typed')
+        self.g('read', '--metric', 'stars', '--value', '12', '--as-of', '2026-11-11', '--source', 'user typed', '--method', 'typed')
         self.g('exp', 'add', '--hypothesis', 'h', '--surface', 'z', '--change-kind', 'post', '--change-ref', 'p', '--metric', 'stars')
         self.g('exp', 'baseline', 'e2'); self.g('exp', 'start', 'e2', code=3)  # baseline dated after the change
         self.g('exp', 'start', 'e1')
         self.assertEqual(self.camp()['experiments'][0]['state'], 'live')
+
+    def test_future_reading_is_refused(self):
+        self.setup_campaign()
+        self.g('read', '--metric', 'stars', '--value', '999', '--as-of', '2030-01-01', '--source', 'model', '--method', 'guess', code=3)
+        (self.dir / '.graph/campaigns/c1/inbox/f.csv').write_text('metric,date,value\nstars,2030-01-01,999\nstars,2026-11-09,9\n', encoding='utf-8')
+        self.g('source', 'add', 'stars', '--via', 'csv'); self.g('read', '--metric', 'stars')
+        self.assertEqual([r['as_of'] for r in growth.readings('c1')], [D0, '2026-11-09'])
 
     def test_baseline_refuses_unknown_and_stale(self):
         self.g('init', 'Grow stars', '--id', 'c1', '--metric', 'stars')
@@ -106,6 +124,18 @@ class StateMachine(Base):
         e = self.camp()['experiments'][0]
         self.assertEqual(e['state'], 'decided'); self.assertEqual(e['decision']['reading']['value'], 30)
         self.g('exp', 'decide', 'e1', '--decision', 'keep', '--reason', 'again', code=3)
+
+    def test_decision_needs_a_reading_from_after_the_window_and_not_the_baseline(self):
+        self.setup_campaign(); self.g('exp', 'start', 'e1')
+        self.t += 7 * DAY + 60                                    # window ended 2026-11-17 12:00
+        self.g('exp', 'decide', 'e1', '--decision', 'keep', '--reason', 'x', '--reading', 'r1', code=3)  # r1 is the baseline
+        self.g('read', '--metric', 'stars', '--value', '11', '--as-of', '2026-11-16')                    # day before the end: too early
+        self.g('exp', 'decide', 'e1', '--decision', 'keep', '--reason', 'x', code=3)
+        self.g('read', '--metric', 'stars', '--value', '10', '--as-of', '2026-11-17')                    # end day, date only: counts
+        self.g('read', '--metric', 'stars', '--value', '10', '--as-of', '2026-11-17', '--source', 'user typed', '--method', 'again')
+        self.g('exp', 'decide', 'e1', '--decision', 'keep', '--reason', 'x', '--reading', 'r3', code=3)  # not the latest, no reason
+        out = self.g('exp', 'decide', 'e1', '--decision', 'keep', '--reason', 'x', '--reading', 'r3', '--why-not-latest', 'r4 is a duplicate')
+        self.assertIn('did not move', out)
 
     def test_below_min_sample_only_inconclusive(self):
         self.g('init', 'Grow stars', '--id', 'c1', '--metric', 'stars'); self.g('source', 'add', 'stars', '--via', 'manual')
@@ -181,20 +211,21 @@ class Queue(Base):
         self.g('queue', 'approve', 'q1', '--words', 'yes, post it', '--hash', self.item()['sha256'][:12])
         self.assertEqual(self.item()['approved']['words'], 'yes, post it')
         (self.dir / '.graph/campaigns/c1/drafts/e1.md').write_text('Edited text after approval', encoding='utf-8')
-        self.g('post', 'q1', '--rung', '1', '--result', 'https://x.com/me/1', code=3)
+        self.claim('q1', '--rung', '1', code=3)
         self.assertEqual(self.item()['state'], 'drafted'); self.assertIsNone(self.item()['approved'])
-        self.g('post', 'q1', '--rung', '1', '--result', 'https://x.com/me/1', code=3)  # still not approved
+        self.claim('q1', '--rung', '1', code=3)  # still not approved
 
     def test_unapproved_and_dropped_never_post(self):
         self.setup_campaign(); self.queue()
-        self.g('post', 'q1', '--rung', '1', '--result', 'https://x.com/me/1', code=3)
+        self.claim('q1', '--rung', '1', code=3)
         self.g('queue', 'drop', 'q1')
-        self.g('post', 'q1', '--rung', '1', '--result', 'https://x.com/me/1', code=3)
+        self.claim('q1', '--rung', '1', code=3)
+        self.g('post', 'q1', '--result', 'https://x.com/me/1', code=3)  # no claim, no confirm: nothing is recorded
 
     def test_expiry_means_never_posted(self):
         self.setup_campaign(); self.queue(); self.approve()
         self.t += 73 * 3600
-        self.g('post', 'q1', '--rung', '1', '--result', 'https://x.com/me/1', code=3)
+        self.claim('q1', '--rung', '1', code=3)
         self.assertEqual(self.item()['state'], 'expired')
         self.assertEqual(growth.checkpoint_cards('c1'), [])
 
@@ -221,9 +252,60 @@ class Queue(Base):
         self.g('queue', 'add', '--experiment', 'e1', '--channel', 'x', '--draft', d2, '--rung', '1', '--kind', 'reply', '--disclosure', 'I built this', code=3)
         self.g(*base, '--kind', 'reply', '--disclosure', 'I built this')
         self.approve()
-        self.g('post', 'q1', '--rung', '1', '--result', 'https://x.com/me/2', '--thread', 'https://x.com/other/status/9', code=3)
-        self.g('post', 'q1', '--rung', '1', '--result', 'https://x.com/me/2', code=3)
-        self.g('post', 'q1', '--rung', '1', '--result', 'https://x.com/me/2', '--thread', 'https://x.com/a/status/1')
+        self.claim('q1', '--rung', '1', '--thread', 'https://x.com/other/status/9', code=3)
+        self.claim('q1', '--rung', '1', code=3)
+        self.post('q1', 'https://x.com/me/2', '--rung', '1', thread='https://x.com/a/status/1')
+
+    def test_edited_draft_equal_to_a_posted_text_is_refused_at_claim(self):
+        self.setup_campaign(exps=2); self.queue('First post text', 'e1', name='1.md'); self.queue('Second post text', 'e2', name='2.md')
+        self.approve('q1'); self.post('q1', 'https://x.com/me/1', '--rung', '1')
+        (self.dir / '.graph/campaigns/c1/drafts/2.md').write_text('first POST text', encoding='utf-8')
+        self.approve('q2'); self.t += 31 * 60
+        self.claim('q2', '--rung', '1', code=3)
+        self.assertNotEqual(self.item('q2')['state'], 'posted')
+        (self.dir / '.graph/campaigns/c1/drafts/1.md').unlink()  # a deleted draft cannot hide the duplicate
+        self.queue('first post text', 'e1', code=3, name='3.md')
+
+    def test_disclosure_must_be_the_channels_own_words(self):
+        self.setup_campaign('--disclosure', '#ad')
+        d = self.draft('d.md', 'Check out the new release')
+        self.g('queue', 'add', '--experiment', 'e1', '--channel', 'x', '--kind', 'post', '--draft', d, '--rung', '1', '--disclosure', 'the', code=3)
+        d2 = self.draft('d2.md', 'Check out the new release #AD')
+        self.g('queue', 'add', '--experiment', 'e1', '--channel', 'x', '--kind', 'post', '--draft', d2, '--rung', '1', '--disclosure', 'the', code=3)
+        self.g('queue', 'add', '--experiment', 'e1', '--channel', 'x', '--kind', 'post', '--draft', d2, '--rung', '1', '--disclosure', '#ad')
+
+    def test_claim_is_one_time_and_bound_to_the_draft(self):
+        self.setup_campaign(); self.queue(); self.approve()
+        tok = self.claim('q1', '--rung', '1')
+        self.claim('q1', '--rung', '1', code=3)  # already claimed
+        (self.dir / '.graph/campaigns/c1/drafts/e1.md').write_text('different text', encoding='utf-8')
+        self.g('post', 'q1', '--confirm', tok, '--result', 'https://x.com/me/1', code=3)
+        self.assertEqual(self.item()['state'], 'claimed')
+        self.g('post', 'q1', '--failed', '--why', 'edited after claim')
+
+    def test_stale_claim_is_refused(self):
+        self.setup_campaign(); self.queue(); self.approve()
+        tok = self.claim('q1', '--rung', '1'); self.t += 31 * 60
+        self.g('post', 'q1', '--confirm', tok, '--result', 'https://x.com/me/1', code=3)
+
+    def test_screenshot_proof_must_be_an_image(self):
+        self.setup_campaign(); self.queue(); self.approve()
+        tok = self.claim('q1', '--rung', '1')
+        self.g('post', 'q1', '--confirm', tok, '--result', str(self.dir / '.graph/campaigns/c1/drafts/e1.md'), code=3)
+
+    def test_channel_loosening_needs_the_users_words_and_cap_is_per_project(self):
+        self.setup_campaign()
+        self.g('channel', 'add', 'x', '--handle', '@me', '--daily-cap', '9', '--min-gap-min', '30', code=3)
+        self.g('channel', 'add', 'x', '--handle', '@me', '--handle', '@other', '--daily-cap', '2', '--min-gap-min', '30', code=3)
+        self.g('channel', 'add', 'x', '--handle', '@me', '--daily-cap', '1', '--min-gap-min', '60')  # tighter is fine
+        self.g('channel', 'add', 'x', '--handle', '@me', '--daily-cap', '2', '--min-gap-min', '60', '--words', 'raise it to 2')
+        self.assertEqual(self.camp()['channels']['x']['changes'][0]['words'], 'raise it to 2')
+        self.assertTrue(any(l['cmd'] == 'channel' and l['outcome'] == 'refused' for l in self.logs()))
+        # a second campaign on the same channel shares the same ledger
+        self.queue(); self.approve(); self.post('q1', 'https://x.com/me/1', '--rung', '1')
+        self.g('init', 'Other goal', '--id', 'c2', '--metric', 'stars'); self.g('source', 'add', 'stars', '--via', 'manual', '--campaign', 'c2')
+        self.g('channel', 'add', 'x', '--handle', '@me', '--daily-cap', '2', '--min-gap-min', '60', '--campaign', 'c2')
+        self.assertEqual(len(growth.ledger_rows()), 1)
 
     def test_draft_must_live_in_drafts_folder(self):
         self.setup_campaign()
@@ -238,33 +320,45 @@ class Queue(Base):
     def test_daily_cap_and_min_gap(self):
         self.setup_campaign(exps=3)
         for i in (1, 2, 3): self.queue(f'text {i}', f'e{i}', name=f'{i}.md'); self.approve(f'q{i}')
-        self.g('post', 'q1', '--rung', '1', '--result', 'https://x.com/me/1')
-        self.g('post', 'q2', '--rung', '1', '--result', 'https://x.com/me/2', code=3)  # gap 30 min
+        self.post('q1', 'https://x.com/me/1', '--rung', '1')
+        self.claim('q2', '--rung', '1', code=3)  # gap 30 min
         self.t += 31 * 60
-        self.g('post', 'q2', '--rung', '1', '--result', 'https://x.com/me/2')
+        self.post('q2', 'https://x.com/me/2', '--rung', '1')
         self.t += 31 * 60
-        self.g('post', 'q3', '--rung', '1', '--result', 'https://x.com/me/3', code=3)  # cap 2 a day
+        self.claim('q3', '--rung', '1', code=3)  # cap 2 a day
 
     def test_ladder_recorded_per_post(self):
         self.setup_campaign(exps=3)
         for i in (1, 2, 3): self.queue(f'text {i}', f'e{i}', name=f'{i}.md'); self.approve(f'q{i}')
-        self.g('post', 'q1', '--rung', '2', '--result', 'https://x.com/me/1', code=3)  # rung 2 needs a why
-        self.g('post', 'q1', '--rung', '2', '--why', 'no api key on this account', '--result', 'https://x.com/me/1')
+        self.claim('q1', '--rung', '2', code=3)  # rung 2 needs a why
+        self.post('q1', 'https://x.com/me/1', '--rung', '2', '--why', 'no api key on this account')
         self.assertEqual(self.item('q1')['posted']['rung'], 2)
         self.assertEqual(self.item('q1')['result']['url'], 'https://x.com/me/1')
         self.assertEqual(self.camp()['experiments'][0]['state'], 'live')  # the post is the change
         self.t += 31 * 60
-        shot = self.dir / 'after.png'; shot.write_bytes(b'png'); before = self.dir / 'before.png'; before.write_bytes(b'png')
-        self.g('post', 'q2', '--rung', '4', '--why', 'site has no api or browser tool', '--result', str(shot), code=3)  # no before shot
-        self.g('post', 'q2', '--rung', '4', '--why', 'site has no api or browser tool', '--before-shot', str(before), '--result', 'https://x.com/me/2', code=3)  # url is not an after shot
-        self.g('post', 'q2', '--rung', '4', '--why', 'site has no api or browser tool', '--before-shot', str(before), '--result', str(shot))
+        shot = self.dir / 'after.png'; shot.write_bytes(b'png'); before = self.dir / 'before.png'; before.write_bytes(b'png2')
+        w = ('--rung', '4', '--why', 'site has no api or browser tool')
+        tok = self.claim('q2', *w)
+        self.g('post', 'q2', '--confirm', tok, '--result', str(shot), code=3)  # no before shot
+        self.g('post', 'q2', '--confirm', tok, '--before-shot', str(before), '--result', 'https://x.com/me/2', code=3)  # url is not an after shot
+        self.g('post', 'q2', '--confirm', tok, '--before-shot', str(shot), '--result', str(shot), code=3)  # same file twice
+        self.g('post', 'q2', '--confirm', 'wrongtoken', '--before-shot', str(before), '--result', str(shot), code=3)
+        self.g('post', 'q2', '--confirm', tok, '--before-shot', str(before), '--result', str(shot))
+        self.assertEqual(self.item('q2')['posted']['before_sha256'], growth.sha_file(before))
         self.assertEqual(self.item('q2')['posted']['rung'], 4); self.assertIn('screenshot', self.item('q2')['result'])
-        self.g('post', 'q3', '--rung', '9', '--result', 'x', code=2)
+        self.g('post', 'q3', '--claim', '--rung', '9', code=2)
 
     def test_failed_post_is_recorded(self):
         self.setup_campaign(); self.queue(); self.approve()
         self.g('post', 'q1', '--failed', '--why', 'site was down')
         self.assertEqual(self.item()['state'], 'failed')
+
+    def test_failed_after_claim_still_counts_toward_gap_but_not_cap(self):
+        self.setup_campaign(exps=2); self.queue('one', 'e1', name='1.md'); self.queue('two', 'e2', name='2.md'); self.approve('q1'); self.approve('q2')
+        self.claim('q1', '--rung', '1'); self.g('post', 'q1', '--failed', '--why', 'maybe half posted')
+        self.claim('q2', '--rung', '1', code=3)  # gap
+        self.t += 31 * 60
+        self.claim('q2', '--rung', '1')
 
     def test_post_without_baseline_is_refused(self):
         self.setup_campaign(baseline=False)
@@ -278,6 +372,38 @@ class Queue(Base):
         growth.checkpoint_apply('c1', [cards[0]['id']], [cards[1]['id']])
         self.assertEqual(self.item('q1')['state'], 'approved'); self.assertTrue(self.item('q1')['approved']['pressed-go'])
         self.assertEqual(self.item('q2')['state'], 'dropped')
+
+    def test_card_shows_the_draft_not_the_models_preview(self):
+        self.setup_campaign()
+        d = self.draft('a.md', 'Totally different text than the label')
+        self.g('queue', 'add', '--experiment', 'e1', '--channel', 'x', '--kind', 'post', '--draft', d, '--preview', 'Harmless short note', '--rung', '1')
+        card = growth.checkpoint_cards('c1')[0]
+        self.assertIn('Totally different text', card['title']); self.assertNotIn('Harmless', card['title'])
+        out = self.g('queue', 'show'); self.assertIn('Totally different text', out)
+        (self.dir / '.graph/campaigns/c1/drafts/a.md').write_text('Edited text after it was shown', encoding='utf-8')
+        self.g('queue', 'approve', 'q1', '--words', 'yes', '--hash', self.item()['sha256'][:12], code=3)  # hash shown is not the current one
+        self.g('queue', 'show')
+        self.assertIn('Edited text', self.g('queue', 'show'))
+        self.g('queue', 'approve', 'q1', '--words', 'yes', '--hash', growth.item_hash(self.item(), 'c1')[:12])
+
+    def test_only_displayed_cards_are_marked_shown(self):
+        self.setup_campaign(exps=6)
+        for i in range(1, 6): self.queue(f'text {i}', f'e{i}', name=f'{i}.md')
+        self.t += 80 * 3600  # all expire; a sixth cannot be added in the same cycle, so move the cycle on
+        c = self.camp(); c['cycle'] += 1; (self.dir / '.graph/campaigns/c1/campaign.json').write_text(json.dumps(c), encoding='utf-8')
+        for i in range(5, 7): self.queue(f'new {i}', f'e{i}', name=f'n{i}.md')
+        self.assertEqual(len(growth.checkpoint_cards('c1', mark=False)), 2)
+        self.assertEqual(self.item('q6')['state'], 'drafted')
+
+    def test_go_approves_only_cards_the_page_showed(self):
+        self.setup_campaign(exps=2); self.queue('one', 'e1', name='1.md')
+        cards = growth.checkpoint_cards('c1')
+        self.queue('two', 'e2', name='2.md')  # added after the page was drawn
+        self.assertEqual(self.item('q2')['state'], 'drafted')
+        growth.checkpoint_apply('c1', [cards[0]['id']], [])
+        self.assertEqual(self.item('q1')['state'], 'approved'); self.assertEqual(self.item('q2')['state'], 'drafted')
+        with self.assertRaises(growth.Refuse): growth.checkpoint_apply('c1', ['queue:q2:' + growth.item_hash(self.item('q2'), 'c1')[:12]], [])  # never shown
+        self.assertEqual(self.item('q2')['state'], 'drafted')
 
     def test_checkpoint_refuses_edited_draft(self):
         self.setup_campaign(); self.queue()
@@ -315,7 +441,7 @@ class Video(Base):
         self.assertEqual(growth.checkpoint_cards('c1')[0]['thumb'], str(th))
         self.approve()
         vid.write_bytes(b'video-two')  # same caption, different video
-        self.g('post', 'q1', '--rung', '3', '--why', 'no api', '--result', 'https://x.com/me/1', code=3)
+        self.claim('q1', '--rung', '3', '--why', 'no api', code=3)
 
     def test_rung_above_one_needs_reason_at_queue_time(self):
         self.setup_campaign(); d = self.draft('a.md', 'hi')
@@ -406,10 +532,23 @@ class EndToEnd(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory(); self.addCleanup(self._tmp.cleanup); self.dir = Path(self._tmp.name)
 
-    def g(self, *args, code=0, stdin=None):
-        r = subprocess.run([sys.executable, GRAPH, *args], cwd=self.dir, capture_output=True, text=True, encoding='utf-8', input=stdin)
+    def g(self, *args, code=0, stdin=None, tty=False):
+        if tty:  # a real terminal for stdin: posts can only be approved by a person at the keyboard
+            import pty
+            master, slave = pty.openpty()
+            try:
+                os.write(master, (stdin or '').encode())
+                r = subprocess.run([sys.executable, GRAPH, *args], cwd=self.dir, capture_output=True, text=True, encoding='utf-8', stdin=slave)
+            finally: os.close(master); os.close(slave)
+        else: r = subprocess.run([sys.executable, GRAPH, *args], cwd=self.dir, capture_output=True, text=True, encoding='utf-8', input=stdin)
         self.assertEqual(r.returncode, code, f'{args}: {r.stdout}{r.stderr}')
         return r.stdout + r.stderr
+
+    def post_it(self, qid, result, *extra, code=0):
+        out = self.g('grow', 'post', qid, '--claim', '--rung', '1', *extra, code=code)
+        if code: return
+        tok = re.search(r'Token (\w+)', out).group(1)
+        self.g('grow', 'post', qid, '--confirm', tok, '--result', result)
 
     def test_cli_tick_opens_run_and_checkpoint_go_approves_card(self):
         self.g('grow', 'init', 'Grow stars', '--id', 'c1', '--metric', 'stars')
@@ -428,11 +567,13 @@ class EndToEnd(unittest.TestCase):
         (self.dir / '.graph/campaigns/c1/drafts').mkdir(parents=True, exist_ok=True)
         (self.dir / '.graph/campaigns/c1/drafts/a.md').write_text('My honest post', encoding='utf-8')
         self.g('grow', 'queue', 'add', '--experiment', 'e1', '--channel', 'x', '--kind', 'post', '--draft', 'drafts/a.md', '--rung', '1')
-        shown = self.g('checkpoint', '--run', 'r2', '--terminal', stdin='go\n')
+        self.g('checkpoint', '--run', 'r2', '--terminal', stdin='go\n', code=3)  # a pipe is not a person at the keyboard
+        self.assertEqual(json.loads((self.dir / '.graph/campaigns/c1/queue.jsonl').read_text().splitlines()[-1])['state'], 'shown')
+        shown = self.g('checkpoint', '--run', 'r2', '--terminal', stdin='go\n', tty=True)
         self.assertIn('My honest post', shown); self.assertIn('POST TO X', shown)
         q = [json.loads(l) for l in (self.dir / '.graph/campaigns/c1/queue.jsonl').read_text().splitlines()]
         self.assertEqual(q[-1]['state'], 'approved'); self.assertTrue(q[-1]['approved']['pressed-go'])
-        self.g('grow', 'post', 'q1', '--rung', '1', '--result', 'https://x.com/me/1')
+        self.post_it('q1', 'https://x.com/me/1')
         log = (self.dir / '.graph/campaigns/c1/log.jsonl').read_text()
         self.assertIn('"cmd": "post"', log)
 
@@ -450,10 +591,37 @@ class EndToEnd(unittest.TestCase):
         (self.dir / '.graph/campaigns/c1/drafts').mkdir(parents=True, exist_ok=True)
         (self.dir / '.graph/campaigns/c1/drafts/a.md').write_text('My honest post', encoding='utf-8')
         self.g('grow', 'queue', 'add', '--experiment', 'e1', '--channel', 'x', '--kind', 'post', '--draft', 'drafts/a.md', '--rung', '1')
-        self.g('checkpoint', '--run', 'r2', '--terminal', stdin='drop 2\n')
+        self.g('checkpoint', '--run', 'r2', '--terminal', stdin='drop 2\n', tty=True)
         q = [json.loads(l) for l in (self.dir / '.graph/campaigns/c1/queue.jsonl').read_text().splitlines()]
         self.assertEqual(q[-1]['state'], 'dropped')
-        self.g('grow', 'post', 'q1', '--rung', '1', '--result', 'https://x.com/me/1', code=3)
+        self.post_it('q1', 'https://x.com/me/1', code=3)
+
+    def test_http_go_without_shown_ids_approves_no_post_and_link_is_hidden(self):
+        import urllib.request, time
+        self.g('grow', 'init', 'Grow stars', '--id', 'c1', '--metric', 'stars')
+        self.g('grow', 'source', 'add', 'stars', '--via', 'manual')
+        self.g('grow', 'channel', 'add', 'x', '--handle', '@me')
+        self.g('grow', 'read', '--metric', 'stars', '--value', '10', '--as-of', time_today())
+        self.g('grow', 'exp', 'add', '--hypothesis', 'h', '--surface', 's', '--change-kind', 'post', '--change-ref', 'p', '--metric', 'stars')
+        self.g('grow', 'exp', 'baseline', 'e1')
+        self.g('init', 'cycle', '--id', 'r2', '--size', 'small', '--skip-preflight', 't', '--skip-context', 't', '--skip-budget', 't')
+        sp = self.dir / '.graph/runs/r2/state.json'; st = json.loads(sp.read_text()); st['campaign'] = 'c1'; sp.write_text(json.dumps(st))
+        self.g('node', 'r2', 'draft', '--role', 'research', '--status', 'pending', '--goal', 'draft the post')
+        (self.dir / '.graph/campaigns/c1/drafts').mkdir(parents=True, exist_ok=True)
+        (self.dir / '.graph/campaigns/c1/drafts/a.md').write_text('My honest post', encoding='utf-8')
+        self.g('grow', 'queue', 'add', '--experiment', 'e1', '--channel', 'x', '--kind', 'post', '--draft', 'drafts/a.md', '--rung', '1')
+        env = dict(os.environ, BROWSER='true')
+        r = subprocess.run([sys.executable, GRAPH, 'checkpoint', '--run', 'r2', '--serve', '--background'], cwd=self.dir, capture_output=True, text=True, encoding='utf-8', env=env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        st = json.loads((self.dir / '.graph/runs/r2/checkpoint.json').read_text())
+        try:
+            self.assertNotIn(st['url'], r.stdout)  # posts wait: the link is not printed to the model
+            req = urllib.request.Request(st['url'].replace('/?', '/go?'), data=json.dumps({'dropped': []}).encode(), method='POST', headers={'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0 Chrome/120'})
+            urllib.request.urlopen(req, timeout=10).read()
+        finally:
+            subprocess.run([sys.executable, GRAPH, 'checkpoint', '--run', 'r2', '--stop'], cwd=self.dir, capture_output=True)
+        q = [json.loads(l) for l in (self.dir / '.graph/campaigns/c1/queue.jsonl').read_text().splitlines()]
+        self.assertEqual(q[-1]['state'], 'shown')  # the page listed nothing, so nothing is approved
 
 
 def time_today():

@@ -1,3 +1,4 @@
+import os; os.environ.setdefault("GRAPH_SKILL_NO_PROBES", "1")  # never call real CLIs (vercel whoami opens browser sign-in)
 import calendar, json, subprocess, sys, time, unittest
 from pathlib import Path
 
@@ -208,3 +209,11 @@ class Research(GraphCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class CanonUrlTests(unittest.TestCase):
+    def test_same_page_same_key(self):
+        import research
+        k = research.canon_url('https://www.Example.com/a/b/?utm_source=x&b=2&a=1#frag')
+        for u in ('http://example.com/a/b?a=1&b=2', 'https://example.com/a/b/?a=1&b=2&fbclid=z'): self.assertEqual(research.canon_url(u), k)
+        self.assertNotEqual(research.canon_url('https://example.com/a/b?a=2&b=2'), k)
