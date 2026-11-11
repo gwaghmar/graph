@@ -1,4 +1,5 @@
 import os; os.environ.setdefault("GRAPH_SKILL_NO_PROBES", "1")  # never call real CLIs (vercel whoami opens browser sign-in)
+import tempfile as _tf; os.environ.setdefault("GRAPH_SKILL_CONFIG_DIR", _tf.mkdtemp(prefix="graph-perm-"))  # never touch the real ~/.config
 import json, os, subprocess, sys, tempfile, unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -161,7 +162,7 @@ class PreflightCase(unittest.TestCase):
         r = self.base(mcp=[])
         out = preflight.resolve(jobs, ['deploy'], r)
         self.assertIn('vercel login', out['deploy']['workaround'])
-        self.assertIn('ask the user', out['deploy']['workaround'])
+        self.assertIn('ask the user', out['deploy']['workaround'].lower())
 
     def test_summary_is_short(self):
         w, r = self.with_tools()

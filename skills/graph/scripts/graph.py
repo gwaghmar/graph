@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from preflight import run_proc
-import userctx, usage, routing, budget, outside, checkpoint, growth, research
+import userctx, usage, routing, budget, outside, checkpoint, growth, research, permits
 
 ROOT = Path('.graph/runs')
 STATUSES = ('pending', 'running', 'retrying', 'complete', 'failed', 'skipped', 'cached')
@@ -14,7 +14,7 @@ DONE = ('complete', 'cached', 'skipped')
 RUN_ID = re.compile(r'^[A-Za-z0-9_-]+$')
 
 # What the current command did, collected for the run log (see write_log).
-CTX = {'msg': None, 'checks': [], 'run': None, 'preflight': None, 'route': None}
+CTX = {'msg': None, 'checks': [], 'run': None, 'preflight': None, 'route': None, 'permits': []}
 
 SIZES = ('small', 'medium', 'large')
 
@@ -1173,6 +1173,42 @@ def cmd_tools(a):
     catalog = (r or {}).get('catalog') or preflight.safe(lambda: preflight.skill_catalog(Path.cwd(), Path.home()), [])
     print(userctx.tools_report(catalog, a.task_text, needs))
 
+# ---- permissions memory: ask once, remember (see permits.py) ----
+def permit_say(text):
+    CTX['permits'].append(text); print(text)
+
+def gate(key, question):
+    """True: allowed (proceed silently, logged). False: denied or skipped before (do not ask, use the workaround, logged).
+    Unknown: stop with exit 3, ONE question line and the exact permit command to record the answer."""
+    e = permits.get(key)
+    if e and e['decision'] == 'allowed': CTX['permits'].append(f"remembered: allowed ({e['at'][:10]}) {key}"); return True
+    if e: permit_say(f"remembered: {e['decision']} ({e['at'][:10]}) {key}. Not asking. Use the workaround."); return False
+    die(3, f'{question}\nThen: {graph_cmd()} permit --key {key} --allow|--deny|--skip --note "<the user\'s words>"')
+
+def cmd_permit(a):
+    key = (a.key or '').strip()
+    err = permits.check_key(key)
+    if err: die(3 if 'tap' in err else 2, f'Refused: {key!r}: {err}')
+    picked = [n for n in ('allow', 'deny', 'skip', 'forget', 'check') if getattr(a, n)]
+    if len(picked) != 1: die(2, 'permit needs exactly one of --allow, --deny, --skip, --forget, --check.')
+    mode = picked[0]
+    if mode == 'check':
+        if gate(key, f'Ask the user once about {key}.'): print(f'allowed: {key}')
+        return
+    if mode == 'forget':
+        print(f'Forgot {key}.' if permits.forget(key) else f'{key} was not recorded.'); return
+    note = (a.note or '').strip()
+    if not note: die(2, 'permit needs --note "<the user\'s words>". Quote the user. Never answer for them.')
+    decision = {'allow': 'allowed', 'deny': 'denied', 'skip': 'skip'}[mode]
+    permits.record(key, decision, note)
+    permit_say(f'Recorded: {key} = {decision}. It will not be asked again.')
+
+def cmd_permits(a):
+    data = permits.load()
+    if a.json: print(json.dumps(data, indent=2, ensure_ascii=False)); return
+    if not data: print('No permissions recorded.'); return
+    for k, v in sorted(data.items()): print(f"{k:<32} {v['decision']:<8} {v['at'][:10]}  {v.get('note', '')[:80]}")
+
 def cmd_choose(a):
     _, d = load(a.run)
     if not (a.why or '').strip(): die(2, 'choose needs --why "<one line>": say why these tools fit.')
@@ -1187,7 +1223,12 @@ def cmd_choose(a):
     d['updated_at'] = now(); save(ROOT / a.run / 'state.json', d)
     print('Toolkit recorded: ' + '; '.join(f"{k} {', '.join(v)}" for k, v in kit.items() if v) + f". Why: {a.why.strip()}")
     for m in miss: print(f'  {m}: not found on this machine')
-    for m in off: print(f'  {m}: turned off. Ask the user before turning it on.')
+    for m in off:
+        kind, _, name = m.partition(' ')
+        e = permits.get(f"{'plugin' if kind == 'plugin' else 'skill'}-on:{name}")
+        if e and e['decision'] == 'allowed': permit_say(f"  {m}: turned off. remembered: allowed ({e['at'][:10]}). Turn it on.")
+        elif e: permit_say(f"  {m}: turned off. remembered: {e['decision']} ({e['at'][:10]}). Not asking. Use another tool.")
+        else: print(f"  {m}: turned off. Ask the user once. Then: {graph_cmd()} permit --key {'plugin' if kind == 'plugin' else 'skill'}-on:{name} --allow|--skip --note \"<the user's words>\"")
 
 def budget_host(d, host=None):
     h = usage.host_key(host if host and host != 'auto' else None)
@@ -1274,6 +1315,8 @@ def cmd_preflight(a):
         info={}
         print(preflight.run_preflight(needs, a.refresh, a.with_accounts, a.json, info))
         CTX['preflight']=info
+        for n in info.get('permits', []): CTX['permits'].append(n)
+        if info.get('questions'): die(3, '\n'.join(q.replace('Then: permit', f'Then: {graph_cmd()} permit') for q in info['questions']))
     except ValueError as e: die(2, str(e))
     except Exception as e: print(f'preflight scan incomplete ({type(e).__name__}). Continue without it or retry with --refresh.')
 
@@ -1307,6 +1350,8 @@ def install_staged(d, run):
     for pk in O(d)['picks']:
         if pk['status'] != 'staged': continue
         if pk['kind'] == 'skill':
+            e = permits.get('install:outside-skills')
+            if not (e and e['decision'] == 'allowed'): lines.append(f"Not installed: {pk['use']} (install:outside-skills is not allowed). Use it as a reference."); continue
             done, err = outside.install_skill(run, pk['use'])
             if err: pk['status'] = 'failed'; lines.append(f"Could not install {pk['use']}: {err}")
             else: pk['status'] = 'ready'; pk['installed'] = done; lines.append(f"Installed skill from {pk['use']} in this project only: {', '.join(done)}")
@@ -1409,6 +1454,8 @@ def cmd_pick(a):
     if a.kind == 'skill' and not outside.skill_dirs(outside.vendor_dir(repo)): die(3, f'Refused: {repo} has no SKILL.md, so it cannot be picked as a skill. Use --as reference or tool.')
     if r['verdict'] == 'warn' and a.kind != 'reference' and approved(d) and not (a.ok or '').strip():
         die(3, f'Refused: the scan of {repo} has warnings. Show them to the user and pass --ok "<the user\'s words>".')
+    if a.kind == 'skill' and not gate('install:outside-skills', f'\U0001f4e6 Installing the outside skill {repo} copies files into this project. Ask the user once: allow installing outside skills, or skip?'):
+        a.kind = 'reference'; print(f'Picked as reference instead: installing outside skills was not allowed.')
     o = O(d)
     o['picks'] = [x for x in o['picks'] if not (x['part'] == a.part and x['use'] == repo)]
     pk = {'part': a.part, 'use': repo, 'kind': a.kind, 'verdict': r['verdict'], 'at': now(), 'status': 'ready' if a.kind == 'reference' else 'staged'}
@@ -1738,7 +1785,7 @@ def cmd_grow(a):
 # ---- run log: .graph/runs/<id>/log.jsonl, append-only, one JSON line per command call ----
 LOG_ARGS = ('project_dir', 'text', 'note', 'why', 'skills', 'plugins', 'clis', 'mcp', 'task_text', 'auto_approve', 'skip_context', 'skip_preflight', 'goal', 'no_check', 'status', 'depends_on', 'check', 'target', 'risk', 'reason', 'command', 'type', 'needs', 'refresh',
             'with_accounts', 'include_dependents', 'skip_budget', 'left_pct', 'resets', 'from_level', 'not_before', 'host', 'session', 'needs', 'effort', 'model',
-            'part', 'query', 'url', 'mentions', 'pick', 'use', 'kind', 'ok', 'set', 'argv', 'where', 'no_sandbox', 'size', 'main', 'name', 'serve', 'terminal', 'no_open', 'open', 'background', 'wait', 'stop', 'serve_child', 'package', 'path',
+            'key', 'allow', 'deny', 'skip', 'forget', 'check', 'part', 'query', 'url', 'mentions', 'pick', 'use', 'kind', 'ok', 'set', 'argv', 'where', 'no_sandbox', 'size', 'main', 'name', 'serve', 'terminal', 'no_open', 'open', 'background', 'wait', 'stop', 'serve_child', 'package', 'path',
             'field', 'sources', 'fresh', 'windows', 'landmark_ok', 'evidence', 'safety', 'review', 'date', 'date_source', 'title', 'landmark', 'level', 'complaint', 'close', 'partial')
 
 def log_path(run_id): return ROOT / run_id / 'log.jsonl'
@@ -1777,6 +1824,7 @@ def write_log(a, code):
         if CTX['checks']: e['checks'] = CTX['checks']
         if CTX['preflight']: e['preflight'] = CTX['preflight']
         if CTX['route']: e['routing'] = CTX['route']
+        if CTX['permits']: e['permits'] = CTX['permits']
         append_log(rid, e)
         if outcome != 'ok' or cmd not in ('render', 'status', 'tree', 'summary', 'next', 'brief', 'validate', 'retry-plan', 'verify-plan', 'models'):
             p = ROOT / rid / 'state.json'; render_files(p, json.loads(p.read_text(encoding='utf-8')))
@@ -1834,6 +1882,8 @@ def main():
     x=sp.add_parser('models');x.add_argument('--refresh',action='store_true');x.add_argument('--host',default='auto');x.add_argument('--run');x.set_defaults(fn=cmd_models,nolock=True)
     x=sp.add_parser('resolve');x.add_argument('run');x.add_argument('node');x.add_argument('--host',default='auto');x.set_defaults(fn=cmd_resolve)
     x=sp.add_parser('status');x.add_argument('run');x.set_defaults(fn=cmd_status,nolock=True)
+    x=sp.add_parser('permit');x.add_argument('--key',required=True);x.add_argument('--run');x.add_argument('--allow',action='store_true');x.add_argument('--deny',action='store_true');x.add_argument('--skip',action='store_true');x.add_argument('--forget',action='store_true');x.add_argument('--check',action='store_true');x.add_argument('--note');x.set_defaults(fn=cmd_permit,nolock=True)
+    x=sp.add_parser('permits');x.add_argument('--run');x.add_argument('--json',action='store_true');x.set_defaults(fn=cmd_permits,nolock=True)
     x=sp.add_parser('log');x.add_argument('run');x.add_argument('--refusals',action='store_true');x.add_argument('--node');x.add_argument('--json',action='store_true');x.set_defaults(fn=cmd_log,nolock=True)
     x=sp.add_parser('context');x.add_argument('--run',required=True);x.add_argument('--project-dir',dest='project_dir');x.set_defaults(fn=cmd_context)
     x=sp.add_parser('profile');x.add_argument('--run',required=True);x.add_argument('--text');x.set_defaults(fn=cmd_profile)

@@ -83,6 +83,7 @@ In normal use the agent runs these for you. Type `/graph <task>` on Claude Code,
 | `choose --run id [--skills --plugins --clis --mcp] --why "..."` | Record the chosen toolkit |
 | `budget --run id [--left-pct N --resets HH:MM] [--host auto]` | Usage left per window with reset time, plan estimate, and a recommendation. Required before approve. `--left-pct` records the user's answer when the host gives no usage |
 | `defer <run> --from-level N --not-before ISO` | Refuse starting nodes on level N and up until that time. A printed suggestion: nothing is scheduled |
+| `permit --key K --allow\|--deny\|--skip --note "..."` / `permits` | Ask once, remember. Per-user answers in `~/.config/graph-skill/permissions.json` for logins, installs, spend, turning tools on. Never approves a post |
 | `find --run id --part P --query "..."` | Search Reddit, Hacker News and GitHub (no login, last 90 days) for skills and repos people already made. Trust bar, top 3, one recommended |
 | `candidate --run id --part P --url U --mentions N --note "..."` | Add a find from X or the web. GitHub links are checked the same way |
 | `scan --run id --part P --pick owner/repo` | Shallow clone into `.graph/vendor` and a static safety scan: clean, warn or block |

@@ -65,11 +65,11 @@ def fetch(url):
 
 def get_json(url, state=None):
     """Return (data, error). On GitHub rate limits wait once, then give up for the rest of this search."""
-    for attempt in (0, 1):
+    for attempt in (0, 1, 2):
         code, text, hdr = fetch(url)
         if code in (403, 429) and 'api.github.com' in url:
             low = {k.lower(): v for k, v in hdr.items()}
-            if state is not None and attempt == 1: state['limited'] = True
+            if state is not None and attempt >= 1: state['limited'] = True
             if attempt == 0:
                 wait = 2.0
                 with contextlib.suppress(ValueError, TypeError):
@@ -77,6 +77,7 @@ def get_json(url, state=None):
                     elif low.get('x-ratelimit-reset') and low.get('x-ratelimit-remaining') == '0': wait = float(low['x-ratelimit-reset']) - now()
                 time.sleep(max(0.0, min(wait, 5.0))); continue
             return None, 'GitHub rate limit'
+        if code == 422 and 'arctic-shift' in url and 'imeout' in text and attempt < 2: time.sleep(2.0 * (attempt + 1)); continue  # the archive says "slow down a bit": retry twice
         if code is None: return None, f'network failed ({text})'
         if code != 200: return None, f'HTTP {code}'
         try: return json.loads(text), None
@@ -93,15 +94,43 @@ def repo_key(owner, name):
 def repos_in(text):
     return {k.lower(): k for m in GH_LINK.finditer(text or '') for k in [repo_key(*m.groups())] if k}
 
-def search_reddit(query):
-    """Posts and comments of the last 90 days. Return (items, error). Each item is (author, text)."""
-    after, q, texts, errs = date_ago(WINDOW_DAYS), urllib.parse.quote_plus(query), [], []
-    for kind, field in (('posts', 'query'), ('comments', 'body')):
-        data, err = get_json(f'https://arctic-shift.photon-reddit.com/api/{kind}/search?{field}={q}&after={after}&limit=50')
-        if err: errs.append(f'{kind} {err}'); continue
+REDDIT = 'https://arctic-shift.photon-reddit.com/api'
+MAX_SUBS = 3
+
+def reddit_subs(query):
+    """Text search needs a subreddit or author, so find subreddits first. The subreddit endpoint matches name prefixes only,
+    so try each query word (and the words joined). Rank by subscribers, skip adult ones. Return (names, error)."""
+    words = [w for w in re.findall(r'[a-z0-9]+', query.lower()) if len(w) >= 2][:4] or [re.sub(r'[^a-z0-9]+', '', query.lower())[:30]]
+    prefixes = [x for x in dict.fromkeys(words + ([''.join(words)] if len(words) > 1 else [])) if x]
+    if not prefixes: return [], 'the query has no usable words'
+    found, errs = {}, []
+    for pre in prefixes:
+        data, err = get_json(f'{REDDIT}/subreddits/search?subreddit_prefix={urllib.parse.quote(pre)}&limit=10')
+        if err: errs.append(f'subreddits {err}'); continue
         for it in (data.get('data') if isinstance(data, dict) else None) or []:
-            if isinstance(it, dict): texts.append((str(it.get('author') or ''), ' '.join(str(it.get(k) or '') for k in ('title', 'selftext', 'body', 'url'))))
-    return texts, '; '.join(errs) or None
+            if isinstance(it, dict) and it.get('display_name') and not it.get('over18') and re.match(r'^[A-Za-z0-9_]{2,40}$', str(it['display_name'])):
+                found[str(it['display_name'])] = int(it.get('subscribers') or 0)
+    return sorted(found, key=lambda n: -found[n])[:MAX_SUBS], '; '.join(errs) or None
+
+def search_reddit(query):
+    """Posts and comments of the last 90 days inside the top subreddits for the query. Return (items, error). Each item is (author, text).
+    arctic-shift refuses a text search without a subreddit or author, so no subreddit means no search."""
+    subs, serr = reddit_subs(query)
+    after, q, texts, errs = date_ago(WINDOW_DAYS), urllib.parse.quote_plus(query), [], []
+    if not subs: return texts, serr or 'no subreddit matches the query words'
+    for sub in subs:
+        for kind, field in (('posts', 'query'), ('comments', 'body')):
+            data, err = get_json(f'{REDDIT}/{kind}/search?{field}={q}&subreddit={sub}&after={after}&limit=50')
+            if err:
+                errs.append(f'{sub} {kind} {err}')
+                if '429' in err: return texts, '; '.join(errs)  # rate limited: stop, keep what came back
+                continue
+            if isinstance(data, dict) and data.get('error'): errs.append(f'{sub} {kind} {clean(data["error"], 60)}'); continue
+            for it in (data.get('data') if isinstance(data, dict) else None) or []:
+                if isinstance(it, dict):
+                    row = (str(it.get('author') or ''), ' '.join(str(it.get(k) or '') for k in ('title', 'selftext', 'body', 'url')))
+                    if row not in texts: texts.append(row)
+    return texts, '; '.join(errs + ([serr] if serr else [])) or None
 
 def search_hn(query):
     since = int(now() - WINDOW_DAYS * 86400)

@@ -119,6 +119,13 @@ On Claude Code with the Workflow tool, prefer `G export-workflow <run>` after `v
 
 Show the final summary to the user (`G summary <run>`). Other commands: `G status <run>`, `G tree <run>`, `G retry-plan <run> --include-dependents`, `G render <run>`, `G event <run> <type> <message>`.
 
+## Ask once
+
+- Ask the user a permission question only once: a login, installing an outside skill, spending money, turning on an off plugin or skill, using a logged-in browser.
+- Before you ask, run `G permit --key <key> --check`. Allowed: go on. Skip or denied: do not ask, use the workaround. Unknown: ask one short question.
+- Record the answer at once: `G permit --key <key> --allow|--deny|--skip --note "<the user's words>"`. `G permits` lists them, `--forget` clears one.
+- Exception: every growth post still needs its own tap at the checkpoint. A permission never approves a post.
+
 ## Rules
 
 - Never push, deploy or open a PR unless the user asks.

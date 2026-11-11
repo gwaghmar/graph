@@ -1,4 +1,5 @@
 import os; os.environ.setdefault("GRAPH_SKILL_NO_PROBES", "1")  # never call real CLIs (vercel whoami opens browser sign-in)
+import tempfile as _tf; os.environ.setdefault("GRAPH_SKILL_CONFIG_DIR", _tf.mkdtemp(prefix="graph-perm-"))  # never touch the real ~/.config
 import contextlib, io, json, os, shutil, subprocess, sys, tempfile, time, unittest, urllib.error
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent)); import briefhelp  # noqa: E402
@@ -6,7 +7,7 @@ from unittest import mock
 
 CORE = Path(__file__).resolve().parent.parent / 'skills' / 'graph' / 'scripts'
 sys.path.insert(0, str(CORE))
-import graph, outside  # noqa: E402
+import graph, outside, permits  # noqa: E402
 
 
 def iso(days_old):
@@ -25,6 +26,8 @@ REPOS = {
     'tiny/new': gh_item('tiny/new', 10, 3),
     'gone/archived': gh_item('gone/archived', 800, 20, archived=True),
 }
+SUBS = {'data': [{'display_name': 'DesignTools', 'subscribers': 900, 'over18': False}, {'display_name': 'Design', 'subscribers': 5000, 'over18': False},
+                 {'display_name': 'DesignNSFW', 'subscribers': 99999, 'over18': True}, {'display_name': 'bad name!', 'subscribers': 1}]}
 REDDIT_POSTS = {'data': [
     {'title': 'try github.com/acme/design-skill', 'selftext': '', 'url': ''},
     {'title': 'x', 'selftext': 'see https://github.com/Acme/Design-Skill.git for it', 'url': ''},
@@ -38,6 +41,7 @@ class Net:
     """Fake network: records urls, answers by url part. Anything else is a 404."""
     def __init__(self, **over):
         self.urls, self.routes = [], {
+            'arctic-shift.photon-reddit.com/api/subreddits/search': (200, SUBS),
             'arctic-shift.photon-reddit.com/api/posts': (200, REDDIT_POSTS),
             'arctic-shift.photon-reddit.com/api/comments': (200, REDDIT_COMMENTS),
             'hn.algolia.com': (200, HN),
@@ -71,6 +75,8 @@ class Base(unittest.TestCase):
         p = mock.patch.object(outside.time, 'sleep'); p.start(); self.addCleanup(p.stop)
         self.fix = self.dir.parent / (self.dir.name + '_fixtures'); self.fix.mkdir()
         self.addCleanup(shutil.rmtree, self.fix, True)
+        p = mock.patch.dict(os.environ, {'GRAPH_SKILL_CONFIG_DIR': str(self.fix / 'cfg')}); p.start(); self.addCleanup(p.stop)
+        permits.record('install:outside-skills', 'allowed', 'test: yes')  # most tests run with installs allowed; permission tests forget it
         self.repos = {}
         p = mock.patch.object(outside, 'clone', self.fake_clone); p.start(); self.addCleanup(p.stop)
 
@@ -87,7 +93,7 @@ class Base(unittest.TestCase):
 
     def cli(self, *args, code=0):
         if args and args[0] == 'init' and '--size' not in args: args = (*args, '--size', 'medium')
-        graph.CTX.update(msg=None, checks=[], run=None, preflight=None, route=None)
+        graph.CTX.update(msg=None, checks=[], run=None, preflight=None, route=None, permits=[])
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.object(sys, 'argv', ['graph.py', *args]), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             try: graph.main(); rc = 0
@@ -136,6 +142,44 @@ class FetchTests(Base):
         self.assertIsNone(code); self.assertEqual(text, 'URLError')
         with mock.patch.object(outside.urllib.request, 'urlopen', side_effect=TimeoutError()):
             self.assertIsNone(outside.fetch('https://x.test/')[0])
+
+
+class RedditShapeTests(Base):
+    def test_real_request_shape(self):
+        texts, err = outside.search_reddit('habit tracker')
+        urls = self.net.urls
+        subs = [u for u in urls if '/subreddits/search?' in u]
+        self.assertTrue(subs and all('subreddit_prefix=' in u for u in subs))
+        self.assertTrue(any('subreddit_prefix=habit' in u for u in subs) and any('subreddit_prefix=habittracker' in u for u in subs))
+        text_urls = [u for u in urls if '/posts/search?' in u or '/comments/search?' in u]
+        self.assertTrue(text_urls and all('&subreddit=' in u and '&after=' in u for u in text_urls))   # a subreddit is mandatory
+        self.assertTrue(any('/posts/search?query=habit+tracker&subreddit=Design&after=' in u for u in urls))
+        self.assertTrue(any('/comments/search?body=habit+tracker&subreddit=Design&after=' in u for u in urls))
+        self.assertFalse(any('DesignNSFW' in u or 'bad' in u.split('subreddit=')[-1] for u in text_urls))   # adult and malformed names are skipped
+        self.assertEqual(len({u.split('subreddit=')[1].split('&')[0] for u in text_urls}), 2)   # top subs, biggest first
+        self.assertIn('subreddit=Design&', text_urls[0])
+        self.assertIsNone(err); self.assertTrue(texts)
+
+    def test_api_error_body_and_no_subreddit_fail_soft(self):
+        self.net.routes['arctic-shift.photon-reddit.com/api/posts'] = (200, {'data': None, 'error': "'query' query parameter requires one of: author, subreddit"})
+        texts, err = outside.search_reddit('habit tracker')
+        self.assertIn('requires one of', err); self.assertTrue(texts)      # comments still came back
+        self.net.routes['arctic-shift.photon-reddit.com/api/subreddits/search'] = (200, {'data': []})
+        texts, err = outside.search_reddit('habit tracker')
+        self.assertEqual(texts, []); self.assertIn('no subreddit', err)
+        self.net.routes['arctic-shift.photon-reddit.com/api/subreddits/search'] = (400, {})
+        self.assertIn('subreddits HTTP 400', outside.search_reddit('zz')[1])
+
+
+class RedditRetryTests(Base):
+    def test_archive_timeout_is_retried_once(self):
+        calls = []
+        def fetch(url):
+            calls.append(url)
+            return (422, '{"data":null,"error":"Timeout. Maybe slow down a bit"}', {}) if len(calls) == 1 else (200, '{"data": []}', {})
+        with mock.patch.object(outside, 'fetch', fetch):
+            self.assertEqual(outside.get_json(outside.REDDIT + '/subreddits/search?subreddit_prefix=a'), ({'data': []}, None))
+        self.assertEqual(len(calls), 2)
 
 
 class FindTests(Base):
@@ -355,6 +399,25 @@ class Flow(Base):
         self.cli('scan', '--run', 'r1', '--part', 'design', '--pick', '../etc', code=2)
         self.cli('scan', '--run', 'r1', '--part', 'design', '--pick', 'big/popular', code=1)         # clone fails soft
 
+    def test_install_asks_once_then_remembers(self):
+        permits.forget('install:outside-skills')
+        self.init(auto=True); self.find_scan()
+        out = self.cli('pick', '--run', 'r1', '--part', 'design', '--use', 'acme/design-skill', '--as', 'skill', code=3)
+        self.assertIn('Ask the user once', out); self.assertIn('permit --key install:outside-skills', out)
+        self.assertFalse((self.dir / '.claude/skills').exists())              # nothing installed while the answer is unknown
+        self.cli('permit', '--run', 'r1', '--key', 'install:outside-skills', '--allow', '--note', 'yes install them')
+        out = self.cli('pick', '--run', 'r1', '--part', 'design', '--use', 'acme/design-skill', '--as', 'skill')
+        self.assertIn('Installed skill', out)
+        log = graph.read_log('r1')
+        self.assertTrue(any('remembered: allowed' in ' '.join(e.get('permits', [])) for e in log))
+        self.assertTrue(any(e['cmd'] == 'pick' and e['outcome'] == 'refused' for e in log))   # the refusal is logged
+
+    def test_skip_is_remembered_and_pick_becomes_reference(self):
+        permits.record('install:outside-skills', 'skip', 'not now')
+        self.init(auto=True); self.find_scan()
+        out = self.cli('pick', '--run', 'r1', '--part', 'design', '--use', 'acme/design-skill', '--as', 'skill')
+        self.assertIn('remembered: skip', out); self.assertIn('as reference', out); self.assertNotIn('Installed', out)
+
     def test_scan_shows_at_most_ten_and_saves_all(self):
         self.init()
         files = {f'f{i}.py': 'import subprocess\n' for i in range(14)}
@@ -493,7 +556,7 @@ class VendorRun(Base):
         self.assertNotIn('MY_SECRET_TOKEN', data['env']); self.assertNotIn('AWS_SECRET_ACCESS_KEY', data['env'])
         self.assertIsNone(data['secret'])
         self.assertTrue({'PATH', 'LANG', 'HOME'} <= set(data['env']))
-        self.assertTrue(set(data['env']) <= {'PATH', 'LANG', 'HOME', 'USERPROFILE', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'TMPDIR', 'TEMP', 'TMP', 'SYSTEMROOT', 'COMSPEC', 'PATHEXT', 'LC_CTYPE', '__CF_USER_TEXT_ENCODING', 'PWD', 'SHLVL', '_'})
+        self.assertTrue(set(data['env']) <= {'CI', 'BROWSER', 'PATH', 'LANG', 'HOME', 'USERPROFILE', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_CACHE_HOME', 'TMPDIR', 'TEMP', 'TMP', 'SYSTEMROOT', 'COMSPEC', 'PATHEXT', 'LC_CTYPE', '__CF_USER_TEXT_ENCODING', 'PWD', 'SHLVL', '_'})
         self.assertEqual(os.path.realpath(data['home']).startswith(os.path.realpath(self.dir / '.graph' / 'tmp')), True)
         self.assertEqual(os.path.realpath(data['cwd']), os.path.realpath(self.dir / '.graph/vendor/acme__design-skill'))
         self.assertEqual(data['argv'], ['a;b', '$HOME'])        # no shell: nothing expanded or split
@@ -574,7 +637,7 @@ class HardeningTests(Base):
         doc = {'candidates': [{'repo': 'new/repo', 'url': 'u', 'stars': 0, 'pushed_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'archived': False, 'mentions': {'reddit': 3}, 'notes': []}]}
         outside.finalize(doc); self.assertFalse(doc['candidates'][0]['passes'])      # 0 stars: mentions alone do not pass
         self.assertEqual(outside.total_mentions({'mentions': {'web': 999}}), outside.MAX_MENTIONS)
-        net = Net(); net.routes = {'arctic-shift': (200, {'data': [{'author': 'bob', 'body': 'see github.com/n/tool'}, {'author': 'bob', 'body': 'again github.com/n/tool'},
+        net = Net(); net.routes = {'api/subreddits/search': (200, SUBS), 'arctic-shift': (200, {'data': [{'author': 'bob', 'body': 'see github.com/n/tool'}, {'author': 'bob', 'body': 'again github.com/n/tool'},
                                                                   {'author': 'n', 'body': 'mine github.com/n/tool'}, {'author': 'amy', 'body': 'github.com/n/tool'}]}), 'hn.algolia': (200, {'hits': []}), 'api.github.com': (404, {})}
         with mock.patch.object(outside, 'fetch', net):
             d = outside.do_find(self.dir, 'p', 'q')
@@ -582,7 +645,7 @@ class HardeningTests(Base):
         self.assertEqual(c['mentions']['reddit'], 2)       # bob once, amy once, the owner not at all
 
     def test_non_object_json_does_not_crash(self):
-        net = Net(); net.routes = {'arctic-shift': (200, [1]), 'hn.algolia': (200, 'x'), 'api.github.com': (200, [1])}
+        net = Net(); net.routes = {'api/subreddits/search': (200, SUBS), 'arctic-shift': (200, [1]), 'hn.algolia': (200, 'x'), 'api.github.com': (200, [1])}
         with mock.patch.object(outside, 'fetch', net):
             d = outside.do_find(self.dir, 'p', 'q')
         self.assertEqual(d['candidates'], [])

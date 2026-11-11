@@ -6,6 +6,8 @@ from __future__ import annotations
 import contextlib, json, os, platform, re, shutil, subprocess, sys, time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import permits
 
 TIMEOUT = 2
 TOOL_TTL, ACCESS_TTL = 24 * 3600, 3600
@@ -36,6 +38,7 @@ def read_json(p):
 def run_proc(cmd, timeout, shell=False, merge=False, capture=True, env=None, cwd=None):
     """Run a command and kill its whole process tree on timeout. Return (code, stdout, stderr, timed_out).
     shell=True is for plan commands only. On timeout the code is None."""
+    env = permits.quiet_env(env)  # CI=1 and a no-op BROWSER: no CLI can open a sign-in page. stdin is DEVNULL below.
     kw = {'creationflags': subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == 'nt' else {'start_new_session': True}
     pipe = subprocess.PIPE if capture else subprocess.DEVNULL
     p = subprocess.Popen(cmd, shell=shell, stdin=subprocess.DEVNULL, stdout=pipe,
@@ -428,7 +431,22 @@ def check(c, r):
 def load_jobs():
     return read_json(Path(__file__).resolve().parent / 'jobs.json')
 
-def resolve(jobs, needs, r):
+def login_gate(tool, questions, notes):
+    """A needed login: use the remembered answer, or add ONE question. Never asks twice."""
+    key, cmd = f'login:{tool}', LOGIN[tool]
+    e = permits.get(key)
+    if e and e['decision'] == 'allowed':
+        notes.append(f"remembered: allowed ({e['at'][:10]}) {key}")
+        return f'{tool} is not logged in. The user allowed login (remembered {e["at"][:10]}): run `{cmd}` yourself'
+    if e:
+        notes.append(f"remembered: {e['decision']} ({e['at'][:10]}) {key}")
+        return f'{tool} login was {e["decision"]} by the user (remembered {e["at"][:10]}). Use another option'
+    name = 'GitHub' if tool == 'gh' else tool.capitalize()
+    questions.append(f'\U0001f511 {name} is not logged in. Ask the user once: log in (run `{cmd}` yourself) or skip? Then: permit --key {key} --allow|--skip --note "<the user\'s words>"')
+    return f'{tool} is not logged in. Ask the user once: log in (run `{cmd}` yourself) or skip'
+
+def resolve(jobs, needs, r, questions=None, notes=None):
+    questions = [] if questions is None else questions; notes = [] if notes is None else notes
     out = {}
     for need in needs:
         res = [(c, *check(c, r)) for c in jobs[need]]
@@ -437,7 +455,10 @@ def resolve(jobs, needs, r):
             out[need] = {'use': pick[0], 'note': pick[2]}
         else:
             why = next((x[2] for x in res if 'not logged in' in x[2]), res[0][2] if res else 'no options')
-            out[need] = {'use': None, 'workaround': f'{why}, or ask the user'}
+            m = re.match(r'(\w+) CLI not logged in', why)
+            if m and m.group(1) in LOGIN:
+                out[need] = {'use': None, 'workaround': login_gate(m.group(1), questions, notes)}
+            else: out[need] = {'use': None, 'workaround': f'{why}, or ask the user'}
     return out
 
 # ---- output ----
@@ -470,9 +491,11 @@ def run_preflight(needs, refresh=False, with_accounts=False, as_json=False, info
     unmapped = [n for n in needs if n not in jobs]
     needs = [n for n in needs if n in jobs]
     r = scan(Path.cwd(), Path.home(), os.environ, refresh, with_accounts)
-    if needs: r['needs'] = resolve(jobs, needs, r)
+    questions, notes = [], []
+    if needs: r['needs'] = resolve(jobs, needs, r, questions, notes)
     if unmapped: r['unmapped'] = unmapped
     if info is not None and unmapped: info['unmapped'] = unmapped
+    if info is not None: info['questions'] = list(dict.fromkeys(questions)); info['permits'] = list(dict.fromkeys(notes))
     if info is not None:  # names and statuses only, for the run log
         info['needs'] = {k: {'tool': d['use'], 'note': d.get('note', '')} for k, d in r.get('needs', {}).items()}
         info['workarounds'] = {k: d['workaround'] for k, d in r.get('needs', {}).items() if not d['use']}

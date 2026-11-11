@@ -4,6 +4,13 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Fixed (Reddit search)
+- Reddit search always failed with HTTP 400: arctic-shift refuses a text search without `subreddit` or `author`. `find` now looks up subreddits from the query words (prefix search), uses the top 3, and searches posts and comments inside them for the last 90 days. A 422 timeout is retried, a 429 stops the step, and partial results are kept.
+
+### Added (ask once, remember)
+- `permit` and `permits`: a per-user permissions memory (`~/.config/graph-skill/permissions.json`). Needed logins, outside skill installs and off tools check it first; allowed proceeds, denied or skip uses the workaround, unknown stops with one question and the exact command to record the answer. Growth posts are never approved by it.
+- Every subprocess the runtime starts is non-interactive: stdin closed, `CI=1`, `BROWSER` a no-op.
+
 ### Fixed (review findings for growth and research mode)
 - Posting is now claim then confirm. `grow post --claim` runs every gate before anything goes out and returns a one-time token. `--confirm <token>` records the post and is refused for a wrong or stale token or an edited draft. Duplicate check no longer swallowed (and uses stored text hashes), disclosure must be the channel's own words, caps, gaps and duplicates use one project ledger, failed claims count toward the gap.
 - Checkpoint: GO approves only the card ids the page showed. Cards show the full draft text and its current hash. Only displayed cards are marked shown. The GO evidence class is stored on the item. A terminal GO for posts needs a TTY. The link is not printed when posts wait. Windows `os.replace` retry, and the server stops even if the state write fails.
