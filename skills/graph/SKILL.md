@@ -35,7 +35,7 @@ Do these in order. The runtime refuses to start any node (exit 3) until the step
 
 Run `G checkpoint --run <id> --serve` for one short page: the plan steps, the top pick per part (with "+2 more"), a safety badge, features from research (add them with `G feature --run <id> --name "<few words>" --why "<few words>"`), cost and security. The user taps what they do not need, then presses GO. The runtime records the approval as "pressed GO", with the drops. It removes dropped pending steps and dropped picks. It refuses if a kept step needs a dropped one.
 
-- `--serve` opens a page on 127.0.0.1 with a one-time token. It stops after GO or 30 minutes. Add `--no-open` to only print the link.
+- `--serve` opens a page on 127.0.0.1 in the browser with a one-time token. The token is never printed. It stops after GO or 30 minutes. If no browser opens, use `--terminal`. The runtime cannot prove who pressed GO, and the summary says so.
 - `--terminal` prints the same list in big short lines and reads `go` or `drop 2,4`.
 - On Claude Code you may ask the same keep or drop list with the host's multi-select question tool. Then record it with `G approve --run <id> --note "<the selection, quoted>"`. The summary marks that "recorded by the model".
 - On other hosts use `--serve`, and fall back to `--terminal`.

@@ -83,7 +83,9 @@ def refresh_prices(home, url=None):
 
 def cost_of(price, r):
     if not price: return None
-    return (r['input'] * price['input'] + r['output'] * price['output'] + r['cache_read'] * price.get('cache_read', 0) + r['cache_write'] * price.get('cache_write', 0)) / 1e6
+    h1 = min(r['cache_write'], r.get('cache_write_1h', 0))  # 1 hour cache writes cost 2x the input price, 5 minute writes the cache_write price
+    return (r['input'] * price['input'] + r['output'] * price['output'] + r['cache_read'] * price.get('cache_read', 0)
+            + (r['cache_write'] - h1) * price.get('cache_write', 0) + h1 * (2 * price['input'] if price.get('cache_write') else 0)) / 1e6
 
 # ---- collectors: each returns a list of records {model, agent, ts, input, output, cache_read, cache_write, reasoning} ----
 def claude_dirs(home, cwd, project=None):
@@ -117,7 +119,8 @@ def collect_claude(home, cwd, t0, t1, session=None, project=None):
                 det = u.get('output_tokens_details') if isinstance(u.get('output_tokens_details'), dict) else {}
                 rec = {'model': str(model), 'ts': ts, 'agent': fid or (o.get('agentId') if o.get('isSidechain') else None),
                        'input': num(u.get('input_tokens')), 'output': num(u.get('output_tokens')), 'cache_read': num(u.get('cache_read_input_tokens')),
-                       'cache_write': num(u.get('cache_creation_input_tokens')), 'reasoning': num(det.get('thinking_tokens'))}
+                       'cache_write': num(u.get('cache_creation_input_tokens')), 'reasoning': num(det.get('thinking_tokens')),
+                       'cache_write_1h': num((u.get('cache_creation') or {}).get('ephemeral_1h_input_tokens') if isinstance(u.get('cache_creation'), dict) else 0)}
                 if not any(rec[k] for k in FIELDS): continue
                 key = m.get('id') or o.get('requestId') or f'{f}:{len(best)}'
                 old = best.get(key)
@@ -195,20 +198,23 @@ def build(recs, d, table, now):
     for r in recs:
         w = who[r['agent']] if r['agent'] else 'orchestrator'
         c = cost_of(find_price(table, r['model']), r)
+        approx = str(r['model']).rstrip().endswith('[1m]')  # long-context rows may be priced higher than the base price
         for store, key in ((rows, (w, r['model'])), (agents, (r['agent'], w) if r['agent'] else None)):
             if key is None: continue
-            b = store.setdefault(key, dict.fromkeys(FIELDS, 0) | {'cost': 0.0, 'unknown': False})
+            b = store.setdefault(key, dict.fromkeys(FIELDS, 0) | {'cost': 0.0, 'unknown': False, 'approx': False})
             for k in FIELDS: b[k] += r[k]
+            b['approx'] = b['approx'] or approx
             if c is None: b['unknown'] = True
             else: b['cost'] += c
     def rowlist(store, names):
-        return [dict(zip(names, k)) | {f: v[f] for f in FIELDS} | {'cost': round(v['cost'], 6), 'unknown': v['unknown']} for k, v in sorted(store.items(), key=lambda kv: str(kv[0]))]
+        return [dict(zip(names, k)) | {f: v[f] for f in FIELDS} | {'cost': round(v['cost'], 6), 'unknown': v['unknown'], 'approx': v['approx']} for k, v in sorted(store.items(), key=lambda kv: str(kv[0]))]
     return rowlist(rows, ('who', 'model')), rowlist(agents, ('agent', 'who'))
 
 def sums(rows):
-    t = dict.fromkeys(FIELDS, 0) | {'cost': 0.0, 'unknown': False}
+    t = dict.fromkeys(FIELDS, 0) | {'cost': 0.0, 'unknown': False, 'approx': False}
     for r in rows:
         for k in FIELDS: t[k] += r[k]
+        t['approx'] = t['approx'] or bool(r.get('approx'))
         t['cost'] += r['cost']; t['unknown'] = t['unknown'] or r['unknown']
     return t
 
@@ -236,7 +242,7 @@ def n(v): return f'{v:,}'
 
 def money(b):
     if b['unknown'] and not b['cost']: return 'n/a'
-    return f"${b['cost']:,.2f}" + (' + n/a' if b['unknown'] else '')
+    return f"${b['cost']:,.2f}" + (' + n/a' if b['unknown'] else '') + (' (approx, long context)' if b.get('approx') else '')
 
 def table_lines(first, groups):
     L = [f'| {first} | Input | Output | Cache read | Cache write | Reasoning | Cost |', '|---|---|---|---|---|---|---|']

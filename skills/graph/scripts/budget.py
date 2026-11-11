@@ -204,8 +204,12 @@ def record_calibration(home, host, run, before, after, tokens, now):
 def capacity(windows, home, host):
     """[(window, tokens left or None, samples)]. Tokens left needs a learned tokens-per-percent."""
     out = []
+    names = sorted({e.get('window') for e in read_jsonl(calib_path(home)) if e.get('host') == host and isinstance(e.get('window'), str)})
     for w in windows:
-        tpp, k = tokens_per_pct(home, host, w['name'])
+        if w['name'] == 'user':  # the user's answer has no window size: borrow the host's best-sampled window rate
+            best = max(((tokens_per_pct(home, host, nm), nm) for nm in names if nm != 'user'), key=lambda x: (x[0][0] is not None, x[0][1]), default=((None, 0), None))
+            tpp, k = best[0]
+        else: tpp, k = tokens_per_pct(home, host, w['name'])
         out.append((w, None if tpp is None else (100 - w['used_pct']) * tpp, k))
     return out
 

@@ -42,10 +42,11 @@ class CP(GraphCase):
             if s: s.close()
 
     def serve(self):
-        p = self.popen('--serve', '--no-open'); self.addCleanup(self.reap, p)
+        uf = os.path.join(self.dir, 'url.txt')
+        p = self.popen('--serve', '--no-open', env={'GRAPH_CHECKPOINT_URL_FILE': uf}); self.addCleanup(self.reap, p)
         line = p.stdout.readline()
-        self.assertIn('http://127.0.0.1:', line)
-        url = line.split('Open this page: ')[1].strip()
+        self.assertIn('http://127.0.0.1:', line); self.assertNotIn('?t=', line)   # the token is never printed
+        url = Path(uf).read_text(encoding='utf-8').strip()
         return p, url
 
     def post(self, url, drops, token_ok=True):
@@ -106,6 +107,19 @@ class ServeTests(CP):
         self.assertTrue(any('token' in m for m in msgs)); self.assertTrue(any('needs dropped step' in m for m in msgs))
         self.assertTrue(self.log()[-1]['outcome'] == 'ok')
         self.node('a', 'running')                                     # approval is real: nodes can start
+
+    def test_idle_connection_does_not_block_go_and_origin_is_checked(self):
+        import socket
+        self.start(); self.plan(); self.add_pick()
+        p, url = self.serve()
+        port = int(url.split(':')[2].split('/')[0])
+        idle = socket.create_connection(('127.0.0.1', port)); self.addCleanup(idle.close)   # silent connection, like a browser preconnect
+        u = url.replace('/?t=', '/go?t=')
+        bad = urllib.request.Request(u, data=b'{"dropped": []}', method='POST', headers={'Origin': 'http://evil.example'})
+        with self.assertRaises(urllib.error.HTTPError) as cm: urllib.request.urlopen(bad, timeout=10)
+        self.assertEqual(cm.exception.code, 403)
+        self.assertEqual(self.post(url, [])[0], 200)
+        p.wait(timeout=10); self.assertEqual(p.returncode, 0)
 
     def test_started_node_cannot_be_dropped(self):
         self.start(); self.plan(); self.g('approve', '--run', 'r1', '--note', 'go'); self.node('c', 'running')

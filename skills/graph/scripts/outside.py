@@ -94,21 +94,21 @@ def repos_in(text):
     return {k.lower(): k for m in GH_LINK.finditer(text or '') for k in [repo_key(*m.groups())] if k}
 
 def search_reddit(query):
-    """Posts and comments of the last 90 days. Return (texts, error). Each text is one item."""
+    """Posts and comments of the last 90 days. Return (items, error). Each item is (author, text)."""
     after, q, texts, errs = date_ago(WINDOW_DAYS), urllib.parse.quote_plus(query), [], []
     for kind, field in (('posts', 'query'), ('comments', 'body')):
         data, err = get_json(f'https://arctic-shift.photon-reddit.com/api/{kind}/search?{field}={q}&after={after}&limit=50')
         if err: errs.append(f'{kind} {err}'); continue
-        for it in (data or {}).get('data') or []:
-            if isinstance(it, dict): texts.append(' '.join(str(it.get(k) or '') for k in ('title', 'selftext', 'body', 'url')))
+        for it in (data.get('data') if isinstance(data, dict) else None) or []:
+            if isinstance(it, dict): texts.append((str(it.get('author') or ''), ' '.join(str(it.get(k) or '') for k in ('title', 'selftext', 'body', 'url'))))
     return texts, '; '.join(errs) or None
 
 def search_hn(query):
     since = int(now() - WINDOW_DAYS * 86400)
     data, err = get_json('https://hn.algolia.com/api/v1/search?query=%s&tags=(story,comment)&numericFilters=created_at_i>%d&hitsPerPage=50' % (urllib.parse.quote_plus(query), since))
     texts = []
-    for it in (data or {}).get('hits') or []:
-        if isinstance(it, dict): texts.append(' '.join(str(it.get(k) or '') for k in ('title', 'url', 'story_text', 'comment_text')))
+    for it in (data.get('hits') if isinstance(data, dict) else None) or []:
+        if isinstance(it, dict): texts.append((str(it.get('author') or ''), ' '.join(str(it.get(k) or '') for k in ('title', 'url', 'story_text', 'comment_text'))))
     return texts, err
 
 def meta_from(item):
@@ -126,7 +126,7 @@ def search_github(query, st):
         q = urllib.parse.quote_plus(f'{words} pushed:>{since}')
         data, err = get_json(f'https://api.github.com/search/repositories?q={q}&sort=stars&order=desc&per_page=10', st)
         if err: errs.append(err); continue
-        for it in (data or {}).get('items') or []:
+        for it in (data.get('items') if isinstance(data, dict) else None) or []:
             m = meta_from(it)
             key = repo_key(*(str(it.get('full_name')).split('/', 1) + [''])[:2]) if m else None
             if key: found.setdefault(key.lower(), (key, m))
@@ -136,14 +136,16 @@ def enrich(key, st):
     """Metadata of one repo, or None."""
     if st.get('limited'): return None
     data, err = get_json(f'https://api.github.com/repos/{key}', st)
-    return meta_from(data) if not err else None
+    return meta_from(data) if not err and isinstance(data, dict) else None
 
 def gh_parts(url):
     m = GH_LINK.search(url or '')
     return repo_key(*m.groups()) if m else None
 
 # ---------- trust bar and rank ----------
-def total_mentions(c): return sum(int(v) for v in (c.get('mentions') or {}).values())
+MAX_MENTIONS = 10
+
+def total_mentions(c): return min(MAX_MENTIONS, sum(max(0, int(v)) for v in (c.get('mentions') or {}).values()))
 
 def judge(c):
     """Apply the trust bar. Return (passes, reason). Popular + active: 200 stars or 3 mentions, and pushed within 90 days."""
@@ -155,6 +157,7 @@ def judge(c):
     age = days_ago(c['pushed_at'])
     if age is None or age > WINDOW_DAYS: return False, f'not updated in {WINDOW_DAYS} days'
     if (c.get('stars') or 0) < BAR_STARS and m < BAR_MENTIONS: return False, f'under {BAR_STARS} stars and under {BAR_MENTIONS} mentions'
+    if (c.get('stars') or 0) < 1: return False, 'no stars yet, mentions alone are not enough'
     return True, 'ok'
 
 def score(c):
@@ -193,9 +196,13 @@ def do_find(run_dir, part, query):
     for name, fn in (('reddit', search_reddit), ('hn', search_hn)):
         texts, err = fn(query)
         sources[name] = f'failed: {err}' if err and not texts else ('ok' + (f' (partly: {err})' if err else ''))
-        for t in texts:
+        seen = {}
+        for i, (author, t) in enumerate(texts):
+            who = author.lower() if author and author not in ('[deleted]', 'None') else f'?{i}'
             for low, key in repos_in(t).items():
-                c = cands.setdefault(low, new_cand(key)); c['mentions'][name] = c['mentions'].get(name, 0) + 1
+                if who == key.split('/')[0].lower(): continue  # the owner talking about their own repo
+                c = cands.setdefault(low, new_cand(key)); seen.setdefault(low, set()).add(who)
+                c['mentions'][name] = len(seen[low])  # distinct people, not raw links
     found, errs = search_github(query, st)
     sources['github'] = ('ok' if not errs else f"failed: {', '.join(errs)}") if found or not errs else f"failed: {', '.join(errs)}"
     if errs and found: sources['github'] = f"ok (partly: {', '.join(errs)})"
@@ -215,6 +222,7 @@ def do_candidate(run_dir, part, url, mentions, note):
     """Add a find the model made through the host's web search. GitHub urls are enriched. Return the doc."""
     if not re.match(r'^https?://[^\s]+$', url or ''): raise ValueError('--url must be an http or https link.')
     if mentions < 0: raise ValueError('--mentions must be 0 or more.')
+    mentions = min(mentions, MAX_MENTIONS)
     doc = load_doc(run_dir, part) or {'part': part, 'query': '', 'at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), 'sources': {}, 'candidates': []}
     repo = gh_parts(url) if urllib.parse.urlparse(url).netloc.lower().endswith('github.com') else None
     host = urllib.parse.urlparse(url).netloc.lower()
@@ -258,13 +266,11 @@ def show_doc(doc, run, cmd_prefix):
     return '\n'.join(L)
 
 # ---------- safety scan ----------
-TEXT_EXT = {'.py', '.js', '.mjs', '.cjs', '.ts', '.tsx', '.jsx', '.sh', '.bash', '.zsh', '.ps1', '.bat', '.cmd', '.rb', '.go', '.rs', '.php', '.pl', '.lua',
-            '.md', '.mdc', '.txt', '.json', '.yml', '.yaml', '.toml', '.cfg', '.ini', '.html', '.htm', '.xml', '.cjs', '.mts', '.cts', '.java', '.kt', '.swift', '.c', '.h', '.cpp'}
 DOC_EXT = {'.md', '.mdc', '.txt', '.json', '.yml', '.yaml', '.toml', '.html', '.htm', '.xml', '.cfg', '.ini'}
 BIN_EXT = {'.exe', '.dll', '.so', '.dylib', '.bin', '.com', '.msi', '.app', '.jar', '.class', '.pyc', '.o', '.a'}
 MAGIC = (b'\x7fELF', b'MZ', b'\xfe\xed\xfa', b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe', b'\xce\xfa\xed\xfe')
-SKIP_DIRS = {'.git', 'node_modules', '__pycache__', '.venv', 'venv'}
-MAX_FILES, MAX_READ = 4000, 1_000_000
+SKIP_DIRS = {'.git', 'node_modules', '__pycache__', '.venv', 'venv'}  # never copied; a repo that ships them is blocked
+MAX_FILES, MAX_READ = 4000, 8_000_000
 I = re.I
 CODE_RULES = [  # (level, rule, regex)
     ('warn', 'network call', re.compile(r'\b(urllib|requests\.(get|post|put)|httpx|aiohttp|http\.client|socket\.socket|fetch\s*\(|XMLHttpRequest|axios|node-fetch|net\.connect|WebSocket\s*\()|\b(curl|wget|Invoke-WebRequest|iwr)\b|https?://(?!github\.com|www\.w3\.org)', I)),
@@ -282,9 +288,15 @@ INJECT = [
     re.compile(r'\bdisregard\s+(all\s+)?(the\s+)?(previous|prior|above|earlier|your|any)\s+[a-z ]{0,20}(instructions?|rules?)', I),
     re.compile(r"\b(do not|don't|dont|never)\s+(tell|inform|show|reveal\s+(this\s+)?to|mention\s+(this\s+)?to)\s+the\s+(user|human|owner)", I),
     re.compile(r'\bwithout\s+(telling|informing|asking)\s+the\s+(user|human|owner)', I),
+    re.compile(r'\b(forget|override|discard|drop)\s+(every|all|any|the)?\s*(earlier|previous|prior|above|existing|your)?\s*(guidelines?|instructions?|rules?|constraints?)', I),
+    re.compile(r'\bkeep\s+this\s+(between\s+us|secret|hidden|quiet)', I),
+    re.compile(r"\binclude\s+the\s+user'?s?\s+(\.env|secrets?|tokens?|credentials?|ssh|api keys?)", I),
     re.compile(r'\bsend\b[^\n]{0,100}\bto\s+https?://', I),
     re.compile(r'\b(upload|post|exfiltrate)\b[^\n]{0,80}\b(secrets?|tokens?|credentials?|api keys?|\.env|ssh)\b[^\n]{0,60}\bhttps?://', I),
 ]
+SECRET_TOK = re.compile(r'(\.ssh\b|\bid_(rsa|ed25519|ecdsa)\b|\.aws\b|\.gnupg|\.kube\b|\.netrc|\.npmrc|\.pypirc|\.git-credentials|Login Data|Keychains?\b|\.config/gcloud|~/\.(claude|codex)\b|\.claude/settings|\.codex/(auth|config))', I)
+NET_TOK = re.compile(r'\b(curl|wget|nc|ncat|Invoke-WebRequest|iwr|urllib|requests|httpx|aiohttp|http\.client|XMLHttpRequest|axios|fetch)\b|https?://(?!github\.com|www\.w3\.org)', I)
+SHELL_LINE = re.compile(r'^\s*(\$\s|sudo\s|rm\s|chmod\s|bash\s|sh\s|zsh\s|python3?\s|node\s|npx?\s|pip3?\s|brew\s|curl\s|wget\s)', I)
 COMMENT = re.compile(r'<!--(.*?)-->', re.S)
 COMMENT_BAD = re.compile(r'\b(ignore|instructions?|you must|you should|assistant|system prompt|do not tell|run|execute|curl|wget|send|secret|token|password|always|never)\b', I)
 HIDDEN_CH = re.compile(r'[​-‏‪-‮⁠-⁤﻿]|[\U000e0000-\U000e007f]')
@@ -311,12 +323,13 @@ def scan_frontmatter(F, rel, text):
 def scan_file(F, root, path):
     rel = path.relative_to(root).as_posix()
     ext = path.suffix.lower()
-    try: raw = path.read_bytes()[:MAX_READ]
-    except OSError: return
+    try:
+        if path.stat().st_size > MAX_READ: add(F, 'block', f'file over {MAX_READ // 1000000} MB, cannot be scanned in full', rel); return
+        raw = path.read_bytes()
+    except OSError: add(F, 'block', 'file could not be read, so it was not scanned', rel); return
     name = path.name.lower()
     if ext in BIN_EXT or raw.startswith(MAGIC) or b'\x00' in raw[:4096]:
         add(F, 'block' if ext in BIN_EXT - {'.pyc', '.class'} or raw.startswith(MAGIC) else 'warn', 'binary file', rel); return
-    if ext not in TEXT_EXT and path.suffix and name not in ('skill.md', 'makefile', 'dockerfile'): return
     text = raw.decode('utf-8', errors='replace')
     if name == 'skill.md': scan_frontmatter(F, rel, text)
     if name == 'package.json':
@@ -337,17 +350,22 @@ def scan_file(F, root, path):
         m = HIDDEN_CH.search(text)
         if m and ext in ('.md', '.mdc', '.txt'): add(F, 'block', 'hidden unicode characters in text', rel, line_of(text, m.start()))
     is_code = ext not in DOC_EXT
-    is_prose = ext in ('.md', '.mdc', '.txt')
-    seen = set()
-    for i, ln in enumerate(text.splitlines(), 1):
-        ln = ln[:3000]
+    is_prose = ext in ('.md', '.mdc', '.txt') or name == 'skill.md'
+    seen, has_secret, has_net = set(), None, False
+    prose_rules = [r for r in CODE_RULES if r[1] == 'pipes a download into a shell']  # secret places in prose are judged per file below
+    for i, ln in enumerate(text.splitlines(), 1):  # every line, whole, no length cut-off
         if BLOB.search(ln) and 'blob' not in seen: seen.add('blob'); add(F, 'warn', 'long encoded or obfuscated blob', rel, i)
+        if has_secret is None and SECRET_TOK.search(ln): has_secret = i
+        if not has_net and NET_TOK.search(ln): has_net = True
         if is_code: rules = CODE_RULES
-        elif is_prose: rules = [r for r in CODE_RULES if r[1] == 'pipes a download into a shell']
-        else: continue
+        elif is_prose: rules = prose_rules
+        else: rules = []
         for level, rule, rx in rules:
             if rule not in seen and rx.search(ln): seen.add(rule); add(F, level, rule, rel, i)
-    return
+        if name == 'skill.md' and 'skill-run' not in seen and SHELL_LINE.search(ln): seen.add('skill-run'); add(F, 'warn', 'SKILL.md has a shell command', rel, i)
+        if name == 'skill.md' and 'skill-url' not in seen and NET_TOK.search(ln): seen.add('skill-url'); add(F, 'warn', 'SKILL.md has a URL or network command', rel, i)
+    if has_secret and has_net: add(F, 'block', 'names a secret place and uses the network in one file', rel, has_secret)
+    elif has_secret and (is_code or is_prose) and 'reads a secret place (ssh, cloud, keychain, browser)' not in seen: add(F, 'warn', 'names a secret place', rel, has_secret)
 
 def scan_tree(root):
     """Static scan of every text file. Nothing in the repo is run. Return findings and a count of files."""
@@ -361,6 +379,8 @@ def scan_tree(root):
         if (root / sub).exists(): add(F, 'warn', 'git hook config', sub)
     real = os.path.realpath(root)
     for dp, dirs, files in os.walk(root, followlinks=False):
+        for d in dirs:
+            if d in SKIP_DIRS and d != '.git': add(F, 'block', f'ships a {d} folder (not scanned, never used)', (Path(dp) / d).relative_to(root).as_posix())
         dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
         for nm in sorted(files + [d for d in dirs if (Path(dp) / d).is_symlink()]):
             p = Path(dp) / nm
@@ -369,7 +389,7 @@ def scan_tree(root):
                 add(F, 'warn' if tgt.startswith(real + os.sep) else 'block', 'symlink' + ('' if tgt.startswith(real + os.sep) else ' that points outside the repo'), p.relative_to(root).as_posix()); continue
             if not p.is_file(): continue
             n += 1
-            if n > MAX_FILES: add(F, 'warn', f'more than {MAX_FILES} files, scan stopped', '.'); return F, n
+            if n > MAX_FILES: add(F, 'block', f'more than {MAX_FILES} files, not fully scanned', '.'); return F, n
             scan_file(F, root, p)
     return F, n
 
@@ -389,8 +409,10 @@ def rmtree(p):
 
 def clone(repo, dest):
     """Shallow clone of a public repo into dest. Return None or an error text. No hooks, no prompts, no credentials."""
-    env = dict(os.environ, GIT_TERMINAL_PROMPT='0', GCM_INTERACTIVE='never')
-    cmd = ['git', '-c', 'credential.helper=', '-c', 'core.hooksPath=' + os.devnull, '-c', 'protocol.ext.allow=never', 'clone', '--depth', '1', '--no-tags', '--single-branch', '--', f'https://github.com/{repo}.git', str(dest)]
+    # Scrubbed env: no user git config (insteadOf rewrites, filters), no ssh agent, no tokens.
+    env = {k: v for k, v in os.environ.items() if k in ('PATH', 'LANG', 'SYSTEMROOT', 'COMSPEC', 'PATHEXT', 'TMPDIR', 'TEMP', 'TMP', 'HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY', 'SSL_CERT_FILE')}
+    env.update(GIT_TERMINAL_PROMPT='0', GCM_INTERACTIVE='never', GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1', GIT_LFS_SKIP_SMUDGE='1', GIT_ASKPASS='', SSH_ASKPASS='')
+    cmd = ['git', '-c', 'credential.helper=', '-c', 'core.sshCommand=false', '-c', 'core.hooksPath=' + os.devnull, '-c', 'protocol.ext.allow=never', 'clone', '--depth', '1', '--no-tags', '--single-branch', '--', f'https://github.com/{repo}.git', str(dest)]
     try: r = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=CLONE_TIMEOUT, env=env, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired: return f'clone took longer than {CLONE_TIMEOUT} seconds'
     except OSError as e: return f'git is not available ({type(e).__name__})'
@@ -402,7 +424,7 @@ def head_commit(dest):
         if r.returncode == 0: return r.stdout.strip()[:40]
     return None
 
-def do_scan(repo):
+def do_scan(repo, run=None):
     """Clone into .graph/vendor, scan, drop .git. Return (result dict, error)."""
     dest = vendor_dir(repo)
     if dest.exists(): rmtree(dest)
@@ -417,6 +439,7 @@ def do_scan(repo):
     commit = head_commit(dest)
     F, n = scan_tree(dest)
     if (dest / '.git').exists(): rmtree(dest / '.git')
+    with contextlib.suppress(OSError): (dest / MARKER).write_text(json.dumps({'owner': 'graph-skill', 'run': run, 'source': repo}) + '\n', encoding='utf-8')
     F.sort(key=lambda f: (f['level'] != 'block', f['file'], f['line']))
     return {'repo': repo, 'verdict': verdict(F), 'files': n, 'commit': commit, 'findings': F, 'at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}, None
 
@@ -470,7 +493,9 @@ def install_skill(run, repo):
     for home in SKILL_HOMES:
         for nm in names:
             t = home / nm
-            if t.exists() and not owned(t): return [], f'{t.as_posix()} already exists and is not ours. Not overwritten.'
+            m = owned(t)
+            if t.exists() and not m: return [], f'{t.as_posix()} already exists and is not ours. Not overwritten.'
+            if t.exists() and m.get('run') != run: return [], f'{t.as_posix()} belongs to another run. Not overwritten.'
     done = []
     for (nm, src), name in zip(found, names):
         for home in SKILL_HOMES:
@@ -494,11 +519,14 @@ def cleanup(run, keep):
     if VENDOR.is_dir():
         for d in sorted(VENDOR.iterdir()):
             repo = d.name.replace('__', '/', 1)
+            m = owned(d) if d.is_dir() else None
+            if m and m.get('run') not in (run, None): continue  # another run's scanned copy
             if repo in keep: kept.append(d.as_posix()); continue
             with contextlib.suppress(Exception): rmtree(d) if d.is_dir() else d.unlink(); removed.append(d.as_posix())
         with contextlib.suppress(OSError): VENDOR.rmdir()
-    if TMP.is_dir():
-        with contextlib.suppress(Exception): rmtree(TMP)
+    if (TMP / run).is_dir():
+        with contextlib.suppress(Exception): rmtree(TMP / run)
+    with contextlib.suppress(OSError): TMP.rmdir()
     return removed, kept
 
 # ---------- vendor-run ----------
@@ -514,3 +542,66 @@ def scrubbed_env(tmp_home):
         for k in ('SYSTEMROOT', 'COMSPEC', 'PATHEXT'):
             if os.environ.get(k): env[k] = os.environ[k]
     return env
+
+# ---------- vendor-run sandbox and agent-config guard ----------
+GUARDED = ('.claude', '.agents', '.codex', '.cursor', '.git/hooks', '.graph/runs')
+
+def sandbox_wrap(argv, work, tmp_home, project, platform=None):
+    """Wrap argv so the tool can read and write only its work folder and temp home, with no access to the real home.
+    Return (argv, None) or (None, reason). macOS: sandbox-exec. Linux: bwrap. Else: no sandbox available."""
+    plat = platform or sys.platform
+    home, work, tmp_home, project = (os.path.realpath(str(x)) for x in (Path.home(), work, tmp_home, project))
+    # The program itself (often a python in ~/.local or ~/.pyenv) must stay readable. Its install folder is allowed, never the whole home.
+    extra = []
+    prog = shutil.which(argv[0]) or argv[0]
+    for cand in (os.path.abspath(prog), os.path.realpath(prog)):
+        if cand.startswith(home + os.sep):
+            extra.append(cand)
+            prefix = os.path.dirname(os.path.dirname(cand))
+            if prefix.startswith(home + os.sep) and prefix != home: extra.append(prefix)
+    extra = sorted(set(extra))
+    if plat == 'darwin' and shutil.which('sandbox-exec'):
+        prof = ('(version 1)(allow default)(deny file-read* (subpath (param "HOME")))(deny file-write*)'
+                '(allow file-read* (subpath (param "WORK")) (subpath (param "TMPH")))'
+                '(allow file-write* (subpath (param "WORK")) (subpath (param "TMPH")) (literal "/dev/null") (literal "/dev/tty") (subpath "/dev/fd"))')
+        params = ['-D', f'HOME={home}', '-D', f'WORK={work}', '-D', f'TMPH={tmp_home}']
+        for i, e in enumerate(extra):
+            prof += f'(allow file-read* (subpath (param "X{i}")))'; params += ['-D', f'X{i}={e}']
+        for i, g in enumerate(GUARDED):
+            prof += f'(deny file-write* (subpath (param "G{i}")))'; params += ['-D', f'G{i}={os.path.join(project, g)}']
+        return ['sandbox-exec', *params, '-p', prof, *argv], None
+    if plat.startswith('linux') and shutil.which('bwrap'):
+        cmd = ['bwrap', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', home, '--bind', work, work, '--bind', tmp_home, tmp_home,
+               '--unshare-pid', '--die-with-parent', '--chdir', work]
+        for e in extra:
+            if os.path.exists(e) and not e.startswith(work + os.sep): cmd += ['--ro-bind', e, e]
+        for g in GUARDED:
+            gp = os.path.join(project, g)
+            if os.path.isdir(gp) and gp.startswith(work + os.sep): cmd += ['--ro-bind', gp, gp]
+        return cmd + ['--', *argv], None
+    return None, 'no sandbox on this system (macOS needs sandbox-exec, Linux needs bwrap, Windows has none)'
+
+def guard_snapshot(project):
+    """Bytes of every small file in the guarded agent-config places, so changes can be found and undone."""
+    snap = {}
+    for g in GUARDED:
+        base = Path(project) / g
+        if g == '.graph/runs': continue  # the runtime's own state is checked by hash below, not copied
+        if not base.exists(): continue
+        for dp, _, files in os.walk(base, followlinks=False):
+            for f in files:
+                p = Path(dp) / f
+                with contextlib.suppress(OSError):
+                    if not p.is_symlink() and p.stat().st_size <= 1_000_000: snap[p.relative_to(project).as_posix()] = p.read_bytes()
+    return snap
+
+def guard_restore(project, before):
+    """Undo writes to agent config. Return the list of changed paths (relative)."""
+    after, changed = guard_snapshot(project), []
+    for rel in sorted(set(before) | set(after)):
+        if before.get(rel) == after.get(rel): continue
+        p = Path(project) / rel; changed.append(rel)
+        with contextlib.suppress(OSError):
+            if rel in before: p.parent.mkdir(parents=True, exist_ok=True); p.write_bytes(before[rel])
+            else: p.unlink()
+    return changed

@@ -24,11 +24,11 @@ def line(mid, model, ts, inp=0, out=0, cr=0, cw=0, think=0, rid='req', agent=Non
 class UsageCase(Base):
     def setUp(self):
         super().setUp()
-        self.t = time.time()
         self.env_extra['CLAUDECODE'] = '1'
         # ids and models in this file are fake; prices go in a fresh cache file in the temp HOME
         self.prices({MA: dict(input=3, output=15, cache_read=0.3, cache_write=3.75), MB: dict(input=1, output=2, cache_read=0, cache_write=0)})
         self.init()
+        self.t = time.time()  # after init: created_at is cut to whole seconds, so records at t are never earlier than it
 
     def init(self):
         self.g('init', 'task', '--id', 'r1', '--skip-preflight', 'test', '--skip-context', 'test', '--skip-budget', 'test', '--auto-approve', 'just do it')

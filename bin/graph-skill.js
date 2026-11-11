@@ -196,7 +196,8 @@ function commandPath(script, home) {
     const rel = script.slice(home.length + 1).split(path.sep).join('/');
     if (safe.test(rel)) return '~/' + rel;
   }
-  return /[\s"'&|<>^()]/.test(script) ? shellQuote(script) : script;
+  const out = process.platform === 'win32' ? script.split(path.sep).join('/') : script;  // forward slashes also work under bash
+  return /[\s"'&|<>^()]/.test(out) ? shellQuote(out) : out;
 }
 
 function findStatuslineScript(flags, cwd, home) {
@@ -220,7 +221,8 @@ function statusline(flags, cwd, home) {
     console.error('graph-skill: statusline.py not found. Run "graph-skill install --global" first, or pass --script <path>.');
     process.exitCode = 1; return;
   }
-  const settingsPath = path.join(home, '.claude', 'settings.json');
+  let settingsPath = path.join(home, '.claude', 'settings.json');
+  try { settingsPath = fs.realpathSync(settingsPath); } catch (e) { /* no file yet: write at the plain path */ }  // dotfile managers symlink this file
   let settings = {};
   if (fs.existsSync(settingsPath)) {
     try { settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8').replace(/^﻿/, '')); } catch (e) {
@@ -266,6 +268,7 @@ function statusline(flags, cwd, home) {
   settings.statusLine = entry;
   const tmp = `${settingsPath}.graph-skill-tmp`;
   fs.writeFileSync(tmp, JSON.stringify(settings, null, 2) + '\n', 'utf8');
+  try { fs.chmodSync(tmp, fs.statSync(settingsPath).mode & 0o7777); } catch (e) { /* new file: keep the default mode */ }
   fs.renameSync(tmp, settingsPath);
   console.log(`Enabled. Restart Claude Code. To undo, restore the backup or remove the statusLine entry.`);
 }
@@ -278,7 +281,10 @@ function main(argv) {
   const command = argv[0] || 'help';
   const flags = { global: argv.includes('--global'), enable: argv.includes('--enable'), yes: argv.includes('--yes') };
   const si = argv.indexOf('--script');
-  if (si !== -1) flags.script = argv[si + 1];
+  if (si !== -1) {
+    if (!argv[si + 1] || argv[si + 1].startsWith('--')) throw new Error('--script needs a path.');
+    flags.script = argv[si + 1];
+  }
   const cwd = process.cwd();
   const home = os.homedir();
   const fns = { install, update, uninstall, doctor, statusline };

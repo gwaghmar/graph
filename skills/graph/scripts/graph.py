@@ -196,6 +196,7 @@ def preflight_done(d):
 def plan_hash(d):
     """Fingerprint of the plan: node ids, dependencies, goals and checks."""
     rows = sorted((n['id'], sorted(n.get('depends_on', [])), (n.get('goal') or '').strip(), n.get('check') or '') + ((n['needs'],) if n.get('needs') else ()) for n in d.get('nodes', []))
+    if size_of(d) != 'medium': rows.append(('size', size_of(d)))  # old hashes (medium) stay valid
     return hashlib.sha256(json.dumps(rows, ensure_ascii=True).encode('utf-8')).hexdigest()[:16]
 
 def budget_missing(d):
@@ -621,8 +622,10 @@ def run_info(d):
     approval=f"- Approval: {short(ap['note'],120)}" if ap else f"- Approval: skipped, the user said: {short(d['auto_approve'],120)}" if d.get('auto_approve') else '- Approval: not recorded.'
     src=(ap or {}).get('source')
     how=('- Approval source: pressed GO at the checkpoint'+(f" (dropped: {short(', '.join(ap['drops']),100)})" if ap.get('drops') else '')+'.') if src=='checkpoint' else '- Approval source: recorded by the model. The runtime cannot prove a human wrote the note.' if ap else None
-    return [f"- Run date: {d.get('run_date') or 'unknown'}", f"- Size: {size_of(d)}", f"- Stale context flagged: {st}", toolkit, approval]+([how] if how else [])+(
-            ['- The runtime records the approval text. It cannot prove a human wrote it.'] if src!='checkpoint' else [])
+    sh=d.get('size_history') or []
+    size_line=f"- Size: {size_of(d)}"+(' (changed: '+', '.join(f"{x.get('from')} to {x.get('to')}" for x in sh)+')' if sh else '')
+    return [f"- Run date: {d.get('run_date') or 'unknown'}", size_line, f"- Stale context flagged: {st}", toolkit, approval]+([how] if how else [])+(
+            ['- The runtime records the approval text. It cannot prove a human wrote it.'] if src!='checkpoint' else ['- GO was pressed on the local page or terminal. The runtime cannot prove who pressed it.'])
 
 ABS_PATH = re.compile(r'''(?<![\w.~$:/\\-])((?:/|[A-Za-z]:[\\/])[^\s'"`;|&<>()=,]+)''')
 SYSTEM_PREFIXES = ('/dev/', '/bin/', '/usr/bin/', '/usr/sbin/', '/sbin/', '/proc/')
@@ -1310,7 +1313,7 @@ def cmd_scan(a):
     c = next((x for x in (doc or {}).get('candidates', []) if (x.get('repo') or '').lower() == a.pick.lower()), None)
     if not c: die(3, f'Refused: {a.pick} is not in the finds for part {a.part}. Run find (or candidate) first.')
     if not c.get('passes'): die(3, f"Refused: {a.pick} is below the trust bar ({c.get('why')}). It is hidden. Scan one of the top 3.")
-    res, err = outside.do_scan(c['repo'])
+    res, err = outside.do_scan(c['repo'], a.run)
     if err: die(1, f'Scan failed for {a.pick}: {err}. Nothing was installed. Try another pick.')
     res['part'] = a.part
     book = scan_book(a.run); book[c['repo']] = res; save(ROOT / a.run / 'scan.json', book)
@@ -1361,11 +1364,24 @@ def cmd_vendor_run(a):
     if not pk: die(3, f'Refused: {a.pick} is not a picked tool. Scan it, then pick it with --as tool.')
     vd = outside.vendor_dir(pk['use'])
     if not vd.is_dir(): die(3, f'Refused: the scanned copy of {pk["use"]} is gone. Scan it again.')
-    cwd = Path.cwd() if a.where == 'project' else vd
+    proj = Path.cwd()
+    cwd = proj if a.where == 'project' else vd
     env = outside.scrubbed_env(outside.TMP / a.run)
-    print('Running inside the project with PATH, LANG and a temporary HOME only. This is NOT a full sandbox: the tool can still use the network and any file this user can reach by full path.')
-    try: code, out, err, timed = run_proc(argv, a.timeout, merge=True, env=env, cwd=str(cwd))
+    if not shutil.which(argv[0], path=env['PATH']) and not os.path.exists(argv[0]): die(2, f'Could not start the command (FileNotFoundError). Check the program name and PATH.')
+    wrapped, why = outside.sandbox_wrap(argv, cwd, outside.TMP / a.run, proj)
+    if wrapped is None:
+        if not a.no_sandbox: die(3, f'Refused: {why}. Repo code runs only in a sandbox. If the user accepts the risk, add --no-sandbox.')
+        print('WARNING: --no-sandbox. The tool can reach any file this user can reach, and the network.')
+        wrapped = argv
+    else: print('Running in a sandbox: reads and writes only in ' + ('the project' if a.where == 'project' else 'its vendor folder') + ' and a temporary home. Agent config folders are read only. The network is open.')
+    before = outside.guard_snapshot(proj)
+    try: code, out, err, timed = run_proc(wrapped, a.timeout, merge=True, env=env, cwd=str(cwd))
     except OSError as e: die(2, f'Could not start the command ({type(e).__name__}). Check the program name and PATH.')
+    changed = outside.guard_restore(proj, before)
+    if changed:
+        log_refusal(a.run, 'vendor-run changed agent config and it was undone: ' + ', '.join(changed[:5]), 'vendor-run')
+        print(tilde('BLOCKED CHANGE undone: the tool wrote agent config: ' + ', '.join(changed[:8]) + '. Tell the user. Do not trust this tool.'))
+        die(3, 'The tool changed agent config. The change was undone.')
     text = tilde(tail_lines(out + err))
     if text.strip(): print(text)
     if timed: die(3, f'The command ran longer than {a.timeout} seconds and was stopped.')
@@ -1376,6 +1392,10 @@ def cmd_size(a):
     p, d = load(a.run)
     old = size_of(d)
     if a.size == old: print(f'Size is already {old}.'); return
+    rank = {'small': 0, 'medium': 1, 'large': 2}
+    if rank.get(a.size, 0) < rank.get(old, 0):
+        if any(n.get('status') != 'pending' for n in d.get('nodes', [])): die(3, f'Refused: cannot go from {old} to {a.size} after a step has started. Gates cannot be dropped midway.')
+        if approved(d): die(3, f'Refused: cannot go from {old} to {a.size} after approval. Start a new run, or ask the user to approve again for the smaller size.')
     d['size'] = a.size; d.setdefault('size_history', []).append({'at': now(), 'from': old, 'to': a.size})
     d['updated_at'] = now(); save(p, d)
     print(f'Size changed: {old} -> {a.size}. Gates were re-checked.')
@@ -1396,9 +1416,9 @@ def cmd_feature(a):
     d['updated_at'] = now(); save(p, d)
     print(f'Feature {fid} added. It shows on the checkpoint.')
 
-def log_refusal(run, msg):
+def log_refusal(run, msg, cmd='checkpoint'):
     with contextlib.suppress(Exception):
-        append_log(run, {'at': now(), 'cmd': 'checkpoint', 'node': None, 'args': {}, 'outcome': 'refused', 'exit_code': 3, 'message': clip(msg)})
+        append_log(run, {'at': now(), 'cmd': cmd, 'node': None, 'args': {}, 'outcome': 'refused', 'exit_code': 3, 'message': clip(msg)})
 
 def apply_checkpoint(run, dropped, source='checkpoint'):
     """Record the user's keep/drop answer. Under the run lock. Refuses (exit 3) with a clear message; nothing is saved then."""
@@ -1435,6 +1455,7 @@ def serve_checkpoint(run, timeout, open_browser):
     token = secrets.token_urlsafe(18)
     state = {'done': False, 'ok': None}
     class H(http.server.BaseHTTPRequestHandler):
+        timeout = 5  # per-connection socket timeout: an idle connection cannot block GO
         def log_message(self, *x): pass
         def _send(self, code, body, ctype='application/json'):
             b = body.encode('utf-8') if isinstance(body, str) else body
@@ -1453,11 +1474,16 @@ def serve_checkpoint(run, timeout, open_browser):
             self._send(200, checkpoint.render_html(checkpoint.model(d, ROOT / run), token), 'text/html')
         def do_POST(self):
             if not self._auth(): return
+            org = self.headers.get('Origin')
+            if org is not None and org not in (f'http://127.0.0.1:{srv.server_port}', f'http://localhost:{srv.server_port}'):
+                log_refusal(run, 'checkpoint: wrong origin'); return self._send(403, json.dumps({'error': 'Forbidden'}))
             if urllib.parse.urlsplit(self.path).path != '/go': return self._send(404, '{}')
             try:
                 n = int(self.headers.get('Content-Length') or 0)
                 if not 0 <= n <= 65536: raise ValueError
-                body = json.loads(self.rfile.read(n) or b'{}'); drops = body.get('dropped', [])
+                body = json.loads(self.rfile.read(n) or b'{}')
+                if not isinstance(body, dict): raise ValueError
+                drops = body.get('dropped', [])
                 if not isinstance(drops, list) or not all(isinstance(x, str) for x in drops): raise ValueError
             except (ValueError, TypeError):
                 return self._send(400, json.dumps({'error': 'Bad request.'}))
@@ -1465,12 +1491,21 @@ def serve_checkpoint(run, timeout, open_browser):
             except SystemExit:
                 msg = CTX['msg'] or 'Refused.'; log_refusal(run, msg); return self._send(409, json.dumps({'error': msg}))
             state['done'] = True; state['ok'] = drops; self._send(200, json.dumps({'ok': True}))
-    srv = http.server.HTTPServer(('127.0.0.1', 0), H); srv.timeout = 0.5
+    srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), H); srv.timeout = 0.5; srv.daemon_threads = True
     url = f'http://127.0.0.1:{srv.server_port}/?t={token}'
-    print(f'Open this page: {url}', flush=True)
+    # The token goes to the browser only. It is not printed, because the agent reads stdout.
+    # GRAPH_CHECKPOINT_URL_FILE is a test hook: the full link is written there (mode 0600).
+    hook = os.environ.get('GRAPH_CHECKPOINT_URL_FILE')
+    if hook:
+        with contextlib.suppress(OSError):
+            fd = os.open(hook, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, 'w', encoding='utf-8') as fh: fh.write(url + '\n')
+    print(f'Open this page: http://127.0.0.1:{srv.server_port}/  (the page opens in the browser with its own one-time link)', flush=True)
     if open_browser:
+        opened = False
         with contextlib.suppress(Exception):
-            import webbrowser; webbrowser.open(url)
+            import webbrowser; opened = bool(webbrowser.open(url))
+        if not opened: print('The browser did not open. Use `checkpoint --terminal` instead.', flush=True)
     end = epoch() + timeout
     try:
         while not state['done'] and epoch() < end: srv.handle_request()
@@ -1509,7 +1544,7 @@ def cmd_checkpoint(a):
 # ---- run log: .graph/runs/<id>/log.jsonl, append-only, one JSON line per command call ----
 LOG_ARGS = ('project_dir', 'text', 'note', 'why', 'skills', 'plugins', 'clis', 'mcp', 'task_text', 'auto_approve', 'skip_context', 'skip_preflight', 'goal', 'no_check', 'status', 'depends_on', 'check', 'target', 'risk', 'reason', 'command', 'type', 'needs', 'refresh',
             'with_accounts', 'include_dependents', 'skip_budget', 'left_pct', 'resets', 'from_level', 'not_before', 'host', 'session', 'needs', 'effort', 'model',
-            'part', 'query', 'url', 'mentions', 'pick', 'use', 'kind', 'ok', 'set', 'argv', 'where', 'size', 'main', 'name', 'serve', 'terminal', 'no_open')
+            'part', 'query', 'url', 'mentions', 'pick', 'use', 'kind', 'ok', 'set', 'argv', 'where', 'no_sandbox', 'size', 'main', 'name', 'serve', 'terminal', 'no_open')
 
 def log_path(run_id): return ROOT / run_id / 'log.jsonl'
 
@@ -1619,7 +1654,7 @@ def main():
     x=sp.add_parser('feature');x.add_argument('--run',required=True);x.add_argument('--name',required=True);x.add_argument('--why');x.set_defaults(fn=cmd_feature)
     x=sp.add_parser('checkpoint');x.add_argument('--run',required=True);x.add_argument('--serve',action='store_true');x.add_argument('--terminal',action='store_true');x.add_argument('--no-open',dest='no_open',action='store_true');x.add_argument('--timeout',type=int,default=1800);x.set_defaults(fn=cmd_checkpoint,nolock=True)
     x=sp.add_parser('keep');x.add_argument('--run',required=True);x.add_argument('--pick',required=True);x.set_defaults(fn=cmd_keep)
-    x=sp.add_parser('vendor-run');x.add_argument('--run',required=True);x.add_argument('--pick',required=True);x.add_argument('--in',dest='where',choices=['vendor','project'],default='vendor');x.add_argument('--timeout',type=int,default=300);x.add_argument('cmd',nargs=argparse.REMAINDER);x.set_defaults(fn=cmd_vendor_run,nolock=True)
+    x=sp.add_parser('vendor-run');x.add_argument('--run',required=True);x.add_argument('--pick',required=True);x.add_argument('--in',dest='where',choices=['vendor','project'],default='vendor');x.add_argument('--timeout',type=int,default=300);x.add_argument('--no-sandbox',dest='no_sandbox',action='store_true');x.add_argument('cmd',nargs=argparse.REMAINDER);x.set_defaults(fn=cmd_vendor_run,nolock=True)
     a=ap.parse_args()
     try: sys.stdout.reconfigure(encoding='utf-8', errors='replace')
     except Exception: pass

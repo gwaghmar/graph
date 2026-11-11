@@ -12,7 +12,16 @@ All notable changes to this project are documented here.
 ### Added (outside skills and repos)
 - `find`, `candidate`, `scan`, `pick`, `keep`, `vendor-run`, `parts` and `part-none`: look for skills and repos people already made (Reddit, Hacker News, GitHub, plus X and web finds from the model), apply a trust bar (200 stars or 3 mentions, and updated in 90 days), show the top 3 with one recommended, scan the pick without running it, install it in the project only and remove it at `finish` unless kept.
 - `init --size large`: `approve` is refused until each part has a pick or a "none found" note.
-- `vendor-run` runs a picked tool with no shell and a scrubbed env. It is not a full sandbox.
+- `vendor-run` runs a picked tool with no shell and a scrubbed env.
+
+### Fixed (review findings for finder, checkpoint, usage and routing)
+- Scan reads whole files and every line, blocks on limits, shipped dependency folders and unreadable files, checks prose and SKILL.md, and finds secret paths without a HOME token.
+- `vendor-run` runs in a sandbox (macOS, Linux `bwrap`), refuses without one unless `--no-sandbox`, and undoes writes to agent config.
+- Checkpoint token is no longer printed, POST checks Origin, the server is threaded with a socket timeout, and the summary keeps the "cannot prove" line.
+- `size --to` cannot lower the size after a node started or approval; size is in the plan hash and the summary.
+- Mentions count distinct people (owner excluded, capped); no-star repos do not pass on mentions alone.
+- `git clone` uses a scrubbed env; cleanup and install are per run.
+- Budget answer now gives a recommendation; statusline writer keeps symlinks and file mode; usage prices 1 hour cache writes; non-object JSON no longer crashes.
 
 ### Added (usage budget)
 - `budget --run <id>`: usage left per window with local reset time (Codex rollout files, or the Claude Code statusline cache), a plan estimate by (tier, role) from your history with shipped defaults under 5 samples, and a recommendation (all now, lighter tier, levels 1-N now, or the user decides). The step is required before approve and node start. `init --skip-budget "<reason>"` waives it.

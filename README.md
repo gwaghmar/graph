@@ -88,9 +88,9 @@ In normal use the agent runs these for you. Type `/graph <task>` on Claude Code,
 | `scan --run id --part P --pick owner/repo` | Shallow clone into `.graph/vendor` and a static safety scan: clean, warn or block |
 | `pick --run id --part P --use owner/repo [--as skill\|reference\|tool] [--ok "..."]` | Use a scanned find. Refuses unscanned or blocked. A skill installs in this project only, after approve |
 | `keep --run id --pick owner/repo` | Keep a pick at finish. The rest is removed |
-| `vendor-run --run id --pick owner/repo [--in vendor\|project] -- cmd...` | Run a picked tool, no shell, PATH and LANG and a temporary HOME only. Not a full sandbox |
+| `vendor-run --run id --pick owner/repo [--in vendor\|project] -- cmd...` | Run a picked tool, no shell, in a sandbox (macOS `sandbox-exec`, Linux `bwrap`) with PATH, LANG and a temporary HOME. Reads and writes stay in its folder, agent config is read only and any change is undone. No sandbox on the system: refused unless `--no-sandbox` |
 | `parts --run id --set a,b [--main a]`, `part-none --run id --part P --note "..."` | Name the parts of a job and log "none found". Large: every part needs a pick or a note before approve. Medium: only `--main` parts |
-| `checkpoint --run id [--serve] [--terminal] [--no-open]` | One short keep/drop screen, then GO. `--serve` is a local page with a one-time token. `--terminal` reads `go` or `drop 2,4`. Large jobs must show it before approve |
+| `checkpoint --run id [--serve] [--terminal] [--no-open]` | One short keep/drop screen, then GO. `--serve` opens a local page with a one-time token that is never printed. `--terminal` reads `go` or `drop 2,4`. Large jobs must show it before approve |
 | `size --run id --to small|medium|large`, `feature --run id --name "..."` | Change the size (logged, gates re-checked). Add a researched feature to the checkpoint |
 | `approve --run id --note "..."` | Record the user's go-ahead, in their words |
 | `node <run> <id> --role R --status S [...]` | Add or update a node, with rule checks |
@@ -134,7 +134,7 @@ Privacy: `context` and `tools` print file names, dates and skill names with shor
 
 ## Use what people already built
 
-For each part of a job, `find` looks at Reddit, Hacker News and GitHub, in that order, with no login. The model adds X and web finds with `candidate`. A find is shown only with 200 or more stars or 3 or more mentions in 90 days, and an update in the last 90 days. `scan` reads every file of the top pick without running it: network calls, shell use, secret places, install scripts, hidden code, binaries, hook settings and prompt-injection text. A block cannot be picked. Picks install in the project only and `finish` removes them. `vendor-run` is not a sandbox: it hides your HOME and env values, but the tool can still reach the network and any file you can reach by full path. Everything fetched is treated as untrusted text, and every command and refusal goes to the run log.
+For each part of a job, `find` looks at Reddit, Hacker News and GitHub, in that order, with no login. The model adds X and web finds with `candidate`. A find is shown only with 200 or more stars or 3 or more different people mentioning it in 90 days (own posts do not count, and a repo with no stars never passes on mentions alone), and an update in the last 90 days. `scan` reads every file of the top pick without running it: network calls, shell use, secret places, install scripts, hidden code, binaries, hook settings and prompt-injection text. A block cannot be picked. Picks install in the project only and `finish` removes them. `vendor-run` runs in a sandbox where one exists (macOS, Linux with `bwrap`): the tool cannot read your home or write to agent config, but the network stays open. On Windows it is refused unless you pass `--no-sandbox`. The scan also checks prose such as SKILL.md, and any URL or shell command in SKILL.md is at least a warning. Its prompt-injection check is a small list of known phrases, so it can miss new wording: read what you pick. Everything fetched is treated as untrusted text, and every command and refusal goes to the run log.
 
 ## Routing by capability tier
 
