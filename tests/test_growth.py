@@ -622,6 +622,13 @@ class EndToEnd(unittest.TestCase):
             urllib.request.urlopen(req, timeout=10).read()
         finally:
             subprocess.run([sys.executable, GRAPH, 'checkpoint', '--run', 'r2', '--stop'], cwd=self.dir, capture_output=True)
+            end = time.time() + 10   # let the server exit: on Windows a live process blocks deleting its working directory
+            while time.time() < end:
+                try: cur = json.loads((self.dir / '.graph/runs/r2/checkpoint.json').read_text())
+                except Exception: cur = None
+                if cur is None or cur.get('status') != 'waiting': break
+                time.sleep(0.05)
+            time.sleep(0.5)
         q = [json.loads(l) for l in (self.dir / '.graph/campaigns/c1/queue.jsonl').read_text().splitlines()]
         self.assertEqual(q[-1]['state'], 'shown')  # the page listed nothing, so nothing is approved
 

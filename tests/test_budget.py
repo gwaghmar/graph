@@ -304,6 +304,8 @@ class Statusline(unittest.TestCase):
         env = {'HOME': str(home), 'USERPROFILE': str(home), 'PATH': '', 'GRAPH_SKILL_NO_PROBES': '1'}
         import os
         env['PATH'] = os.environ.get('PATH', '')
+        for k in ('SYSTEMROOT', 'COMSPEC', 'PATHEXT', 'TEMP', 'TMP'):  # Windows: python and cmd.exe need these to start
+            if os.environ.get(k): env[k] = os.environ[k]
         return subprocess.run([sys.executable, str(CORE / 'statusline.py'), *args], input=stdin, capture_output=True, text=True, encoding='utf-8', env=env)
 
     def test_script_writes_cache_atomically_and_prints_line(self):
