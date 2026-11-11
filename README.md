@@ -1,8 +1,31 @@
 # Graph
 
+**Turns any idea into a checked plan your AI must follow, from research to result.**
+**It finds the best tools, asks you once, and proves every step.**
+
+Works in Claude Code, Codex, Cursor, OpenCode and OpenClaw (one Agent Skills `SKILL.md`).
+
+```
+claude plugin marketplace add gwaghmar/graph
+claude plugin install graph@graph-skill
+```
+or `npx graph-skill install`
+
+| | What it does |
+|---|---|
+| 🧠 Reads you first | Your rule files and memory, old notes flagged |
+| 🔎 Uses what people built | Finds popular, active skills and repos (Reddit, Hacker News, GitHub), safety-scans them, installs them project-only |
+| ✅ One tap to approve | A keep/drop screen with one GO button. Nothing runs before it |
+| 🛑 Rules in code | Task order, check gates, retry cap and finish gate are enforced by a script, not a prompt |
+| 🪙 Tokens and cost | Real token counts from the host, API-price cost, usage left and refill time |
+| 🌱 Growth mode | Weekly experiments; every post needs your tap |
+| 🔬 Research mode | Dated sources checked against a freshness rule for the field |
+| 📜 Logs everything | Every action and refusal, in a plain HTML report |
+
 A plan gate and run recorder for coding agents. You write a plan as a dependency graph. A small Python script checks the plan and refuses rule breaks. It also records every run.
 
 [![CI](https://github.com/gwaghmar/graph/actions/workflows/ci.yml/badge.svg)](https://github.com/gwaghmar/graph/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/graph-skill?color=cb3837&label=npm)](https://www.npmjs.com/package/graph-skill)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ## What the code enforces
