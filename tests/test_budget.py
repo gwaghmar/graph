@@ -64,7 +64,8 @@ class Adapters(BudgetBase):
         rollout(self.home, [((10, 300, t + 1000), (5, 10080, t + 9000)), ((42, 300, t + 3600), (7, 10080, t + 86400))])
         r = self.budget()
         self.assertIn('5h: 58% left (42% used)', r.stdout); self.assertIn('7d: 93% left', r.stdout)
-        self.assertIn(f'resets {hm(t + 3600)}', r.stdout); self.assertIn('source codex session file', r.stdout)
+        self.assertRegex(r.stdout, rf'resets (\d{{4}}-\d\d-\d\d )?{hm(t + 3600)}')   # the date shows when it is not today
+        self.assertIn('source codex session file', r.stdout)
         self.assertIn('Approximate', r.stdout)
         b = self.state()['budget']
         self.assertEqual({w['name'] for w in b['before']}, {'5h', '7d'})
@@ -322,7 +323,9 @@ class Statusline(unittest.TestCase):
     def test_script_passes_through_to_wrapped_command(self):
         import tempfile
         with tempfile.TemporaryDirectory() as tmp:
-            wrapped = f'"{sys.executable}" -c "import sys; print(\'OLD:\' + str(len(sys.stdin.read()) > 5))"'
+            old = Path(tmp) / 'old_status.py'   # a script file: no nested quotes for cmd.exe to mangle
+            old.write_text("import sys\nprint('OLD:' + str(len(sys.stdin.read()) > 5))\n", encoding='utf-8')
+            wrapped = f'"{sys.executable}" "{old}"'
             r = self.run_script(Path(tmp), json.dumps({'rate_limits': {'five_hour': {'used_percentage': 20, 'resets_at': 1900000000}}}), wrapped)
             self.assertEqual(r.stdout.strip(), 'OLD:True')
             self.assertTrue((Path(tmp) / '.cache/graph-skill/claude-rate-limits.json').exists())

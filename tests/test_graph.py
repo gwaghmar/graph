@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent)); import briefhelp  # no
 GRAPH = str(Path(__file__).resolve().parent.parent / 'skills' / 'graph' / 'scripts' / 'graph.py')
 
 
+SEP = '&' if os.name == 'nt' else '; '   # cmd.exe has no ';' separator
 TRUE = 'python -c pass' if os.name == 'nt' else 'true'   # no `true` binary on Windows
 
 class GraphCase(unittest.TestCase):
@@ -276,7 +277,7 @@ class Checks(GraphCase):
 
     def test_failing_check_refuses_and_marks_failed(self):
         self.init()
-        self.node('a', 'running', '--check', 'echo boom; exit 4')
+        self.node('a', 'running', '--check', 'echo boom' + SEP + 'exit 4')
         r = self.node('a', 'complete', code=3)
         self.assertIn('check failed', r.stderr)
         n = self.state()['nodes'][0]
@@ -313,7 +314,7 @@ class Checks(GraphCase):
 
     def test_brief_has_goal_check_output_attempt(self):
         self.init()
-        self.node('a', 'running', '--check', 'echo nope; exit 1', '--goal', 'Make it work')
+        self.node('a', 'running', '--check', 'echo nope' + SEP + 'exit 1', '--goal', 'Make it work')
         self.node('a', 'complete', code=3)
         out = self.g('brief', 'r1', 'a').stdout
         for want in ('Make it work', 'echo nope', 'nope', 'attempt 2 of 3'):
@@ -359,7 +360,7 @@ class Summary(GraphCase):
 
     def test_failed_node_summary(self):
         self.init()
-        self.node('a', 'running', '--check', 'echo boom; exit 3'); self.node('a', 'complete', code=3)
+        self.node('a', 'running', '--check', 'echo boom' + SEP + 'exit 3'); self.node('a', 'complete', code=3)
         self.g('finish', 'r1', '--status', 'failed')
         s = self.summary()
         self.assertIn('The run failed.', s)
@@ -367,7 +368,7 @@ class Summary(GraphCase):
 
     def test_html_has_summary_and_evidence(self):
         self.init()
-        self.node('a', 'running', '--check', 'echo hello_out; exit 0'); self.node('a', 'complete')
+        self.node('a', 'running', '--check', 'echo hello_out' + SEP + 'exit 0'); self.node('a', 'complete')
         self.g('finish', 'r1')
         h = (Path(self.dir) / '.graph/runs/r1/graph.html').read_text(encoding='utf-8')
         self.assertLess(h.index('Run summary'), h.index('Diagram'))
@@ -703,7 +704,7 @@ class SecondRound(GraphCase):
         self.init()
         self.node('a', 'pending', '--goal', 'g', '--check', sib + ' -q || true')
         self.node('b', 'pending', '--goal', 'g', '--check', inside + ' -q || true')
-        out = self.md()
+        out = self.md().replace('\\', '/')
         self.assertIn('venv-sibling/bin/pytest outside the project', out)
         self.assertNotIn('Node b: check depends', out)
 

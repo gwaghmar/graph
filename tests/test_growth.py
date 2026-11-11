@@ -534,6 +534,7 @@ class EndToEnd(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory(); self.addCleanup(self._tmp.cleanup); self.dir = Path(self._tmp.name)
 
     def g(self, *args, code=0, stdin=None, tty=False):
+        if tty and os.name == 'nt': self.skipTest('needs a pty (no pty module on Windows)')
         if tty:  # a real terminal for stdin: posts can only be approved by a person at the keyboard
             import pty
             master, slave = pty.openpty()

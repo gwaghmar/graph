@@ -1634,7 +1634,10 @@ def serve_checkpoint(run, timeout, open_browser, quiet=False):
             state['done'] = True; state['ok'] = drops  # set first: the approval is recorded, so the server must stop even if the state write fails
             try: checkpoint.write_state(rd, status='approved', pressed_from=cls, drops=drops, done_at=now())
             finally: self._send(200, json.dumps({'ok': True}))
-    srv = http.server.ThreadingHTTPServer(('127.0.0.1', 0), H); srv.timeout = 0.5; srv.daemon_threads = True
+    class Srv(http.server.ThreadingHTTPServer):
+        def server_bind(self):  # HTTPServer.server_bind calls socket.getfqdn(), a reverse DNS lookup that can stall for many seconds on some hosts
+            import socketserver; socketserver.TCPServer.server_bind(self); self.server_name = '127.0.0.1'; self.server_port = self.socket.getsockname()[1]
+    srv = Srv(('127.0.0.1', 0), H); srv.timeout = 0.5; srv.daemon_threads = True
     url = f'http://127.0.0.1:{srv.server_port}/?t={token}'
     end = epoch() + timeout
     checkpoint.write_state(rd, status='waiting', pid=os.getpid(), port=srv.server_port, url=url, started=now(), expires=end, pressed_from=None, drops=None)
